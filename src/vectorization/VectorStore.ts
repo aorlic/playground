@@ -83,7 +83,7 @@ export class VectorStore {
       const results = await this.table
         .search(Array.from(queryVector))
         .limit(limit)
-        .execute();
+        .toArray();
 
       return results.map((row: any) => ({
         nodeId: row.nodeId,
@@ -139,7 +139,7 @@ export class VectorStore {
         query = query.where(filters.join(' AND '));
       }
 
-      const results = await query.limit(limit).execute();
+      const results = await query.limit(limit).toArray();
 
       return results.map((row: any) => ({
         nodeId: row.nodeId,
@@ -173,7 +173,7 @@ export class VectorStore {
       const count = await this.table.countRows();
 
       // Sample nodes to calculate averages (LanceDB doesn't have aggregation yet)
-      const sample = await this.table.limit(1000).execute();
+      const sample = await this.table.query().limit(1000).toArray();
 
       let totalComplexity = 0;
       let totalMaintainability = 0;

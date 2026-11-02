@@ -5,7 +5,14 @@
       "Bash(npm run dev:*)",
       "Bash(npm install:*)",
       "Bash(npm uninstall:*)",
-      "Bash(npm run build:*)"
+      "Bash(npm run build:*)",
+      "Bash(npx tsc:*)",
+      "Bash(node dist/diagnose-metrics.js:*)",
+      "Bash(DEBUG_METRICS=1 node dist/diagnose-metrics.js:*)",
+      "Bash(node test-method-metrics.js:*)",
+      "Bash(node:*)",
+      "Bash(ollama list:*)",
+      "Bash(ollama pull:*)"
     ],
     "deny": [],
     "ask": []

@@ -1,7 +1,8 @@
-import { ProgramDependencyGraph, VectorizedNode, SearchResult } from '../types';
+import { ProgramDependencyGraph, VectorizedNode, SearchResult, IntentAnalysis } from '../types';
 import { NodeSerializer } from './NodeSerializer';
 import { BGEM3Embedder } from './BGEM3Embedder';
 import { VectorStore } from './VectorStore';
+import { IntentAnalyzer } from '../IntentAnalyzer';
 
 /**
  * Main orchestrator for PDG vectorization and semantic search
@@ -10,20 +11,27 @@ import { VectorStore } from './VectorStore';
  * 1. Serialize PDG nodes to rich text
  * 2. Generate embeddings using BGE-M3 via Ollama
  * 3. Store vectors in LanceDB for fast search
+ * 4. (Optional) Use IntentAnalyzer for query expansion
  */
 export class PDGVectorizer {
   private serializer: NodeSerializer;
   private embedder: BGEM3Embedder;
   private store: VectorStore;
+  private intentAnalyzer?: IntentAnalyzer;
 
   constructor(
     ollamaUrl?: string,
     modelName?: string,
-    dbPath?: string
+    dbPath?: string,
+    enableIntentAnalysis: boolean = true
   ) {
     this.serializer = new NodeSerializer();
     this.embedder = new BGEM3Embedder(ollamaUrl, modelName);
     this.store = new VectorStore(dbPath);
+
+    if (enableIntentAnalysis) {
+      this.intentAnalyzer = new IntentAnalyzer(ollamaUrl);
+    }
   }
 
   /**
@@ -34,6 +42,10 @@ export class PDGVectorizer {
 
     await this.embedder.initialize();
     await this.store.initialize();
+
+    if (this.intentAnalyzer) {
+      await this.intentAnalyzer.initialize();
+    }
 
     console.log('\n✓ PDG Vectorizer ready\n');
   }
@@ -120,22 +132,119 @@ export class PDGVectorizer {
     await this.embedder.initialize();
     await this.store.initialize();
     await this.store.loadTable();
+
+    if (this.intentAnalyzer) {
+      await this.intentAnalyzer.initialize();
+    }
+
     console.log('✓ Loaded existing database\n');
   }
 
   /**
-   * Search for code related to a query
+   * Search for code related to a query (with optional intent analysis)
    */
   async search(query: string, limit = 10): Promise<SearchResult[]> {
     console.log(`\nSearching for: "${query}"\n`);
 
-    // Generate query embedding
-    const queryEmbedding = await this.embedder.embed(query);
+    // If intent analyzer is available, use intent-based search
+    if (this.intentAnalyzer) {
+      return await this.searchWithIntents(query, limit);
+    }
 
-    // Search vector store
+    // Otherwise, use simple search
+    const queryEmbedding = await this.embedder.embed(query);
     const results = await this.store.search(new Float32Array(queryEmbedding), limit);
 
     return results;
+  }
+
+  /**
+   * Search using intent analysis and query expansion
+   */
+  async searchWithIntents(query: string, limit = 10): Promise<SearchResult[]> {
+    console.log('Analyzing query intent...\n');
+
+    // Analyze the query to extract intents
+    const analysis = await this.intentAnalyzer!.analyzeQuery(query);
+
+    if (analysis.intents.length === 0) {
+      console.log('⚠ No intents extracted, falling back to simple search\n');
+      const queryEmbedding = await this.embedder.embed(query);
+      return await this.store.search(new Float32Array(queryEmbedding), limit);
+    }
+
+    // Display extracted intents
+    console.log(`Extracted ${analysis.intents.length} intent(s):\n`);
+    analysis.intents.forEach((intent, i) => {
+      console.log(`${i + 1}. ${intent.type.toUpperCase()}: ${intent.description}`);
+      console.log(`   Keywords: ${intent.keywords.slice(0, 5).join(', ')}`);
+    });
+    console.log('');
+
+    // Search for each intent and combine results
+    const allResults: Map<string, SearchResult & { score: number }> = new Map();
+
+    for (let i = 0; i < analysis.intents.length; i++) {
+      const intent = analysis.intents[i];
+
+      // Create expanded query from intent
+      const expandedQuery = this.buildExpandedQuery(intent);
+
+      // Search with expanded query
+      const queryEmbedding = await this.embedder.embed(expandedQuery);
+      const results = await this.store.search(new Float32Array(queryEmbedding), limit * 2);
+
+      // Add results with weighted scores
+      const intentWeight = 1.0 / (i + 1); // First intent gets more weight
+
+      results.forEach(result => {
+        const existing = allResults.get(result.nodeId);
+        const similarity = 1 - result._distance;
+        const weightedScore = similarity * intentWeight;
+
+        if (existing) {
+          // If result already exists, boost its score
+          existing.score += weightedScore;
+        } else {
+          // Add new result
+          allResults.set(result.nodeId, {
+            ...result,
+            score: weightedScore,
+          });
+        }
+      });
+    }
+
+    // Sort by combined score and take top results
+    const rankedResults = Array.from(allResults.values())
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map(({ score, ...result }) => result);
+
+    return rankedResults;
+  }
+
+  /**
+   * Build expanded query from intent
+   */
+  private buildExpandedQuery(intent: any): string {
+    const parts: string[] = [];
+
+    parts.push(intent.description);
+
+    if (intent.keywords) {
+      parts.push(intent.keywords.join(' '));
+    }
+
+    if (intent.technicalTerms) {
+      parts.push(intent.technicalTerms.join(' '));
+    }
+
+    if (intent.relatedConcepts) {
+      parts.push(intent.relatedConcepts.join(' '));
+    }
+
+    return parts.join(' ');
   }
 
   /**

@@ -128,6 +128,60 @@ export class NodeSerializer {
       parts.push('');
     }
 
+    // Semantic Annotations
+    if (node.metadata?.semantics) {
+      const sem = node.metadata.semantics;
+
+      // Description from JSDoc
+      if (sem.description) {
+        parts.push('Description:');
+        parts.push(sem.description);
+        parts.push('');
+      } else if (sem.summary) {
+        parts.push(`Summary: ${sem.summary}`);
+        parts.push('');
+      }
+
+      // Purpose
+      if (sem.purpose) {
+        parts.push(`Purpose: ${sem.purpose}`);
+      }
+
+      // Patterns
+      if (sem.patterns && sem.patterns.length > 0) {
+        parts.push(`Design Patterns: ${sem.patterns.join(', ')}`);
+      }
+
+      // Domain terms
+      if (sem.domainTerms && sem.domainTerms.length > 0) {
+        parts.push(`Domain Concepts: ${sem.domainTerms.join(', ')}`);
+      }
+
+      // Technical keywords
+      if (sem.technicalKeywords && sem.technicalKeywords.length > 0) {
+        parts.push(`Technical Keywords: ${sem.technicalKeywords.join(', ')}`);
+      }
+
+      // External dependencies
+      if (sem.externalDependencies && sem.externalDependencies.length > 0) {
+        parts.push(`External Libraries: ${sem.externalDependencies.join(', ')}`);
+      }
+
+      // JSDoc tags
+      if (sem.tags && sem.tags.length > 0) {
+        parts.push('JSDoc Tags:');
+        sem.tags.forEach(tag => {
+          if (tag.text) {
+            parts.push(`- @${tag.name}: ${tag.text}`);
+          } else {
+            parts.push(`- @${tag.name}`);
+          }
+        });
+      }
+
+      parts.push('');
+    }
+
     // Dependencies (what this code calls)
     if (dependencies.names.length > 0) {
       parts.push(`Dependencies (calls): ${dependencies.names.join(', ')}`);

@@ -37,6 +37,70 @@ export interface CodeMetrics {
 }
 
 /**
+ * Semantic annotations extracted during PDG building
+ */
+export interface SemanticAnnotations {
+  // JSDoc information
+  description?: string;               // Main description from JSDoc
+  summary?: string;                   // Short summary (first line)
+  tags?: JSDocTag[];                  // All JSDoc tags (@param, @returns, etc.)
+
+  // Semantic keywords and concepts
+  domainTerms?: string[];             // Domain-specific terms (e.g., "authentication", "payment")
+  technicalKeywords?: string[];       // Technical terms (e.g., "async", "promise", "http")
+
+  // Pattern/purpose detection
+  patterns?: string[];                // Detected patterns (e.g., "singleton", "factory", "observer")
+  purpose?: CodePurpose;              // Primary purpose of this code
+
+  // Relationships
+  relatedConcepts?: string[];         // Related business/technical concepts
+  externalDependencies?: string[];    // External libraries/APIs used
+}
+
+/**
+ * JSDoc tag representation
+ */
+export interface JSDocTag {
+  name: string;       // Tag name (e.g., "param", "returns", "description")
+  text?: string;      // Tag text/description
+  comment?: string;   // Additional comment
+}
+
+/**
+ * Code purpose classification
+ */
+export enum CodePurpose {
+  // Data operations
+  CREATE = 'create',                  // Creating/inserting data
+  READ = 'read',                      // Reading/fetching data
+  UPDATE = 'update',                  // Updating/modifying data
+  DELETE = 'delete',                  // Deleting data
+
+  // Processing
+  VALIDATION = 'validation',          // Input validation
+  TRANSFORMATION = 'transformation',  // Data transformation
+  CALCULATION = 'calculation',        // Calculations/computations
+
+  // Integration
+  API_ENDPOINT = 'api_endpoint',      // API endpoint handler
+  API_CLIENT = 'api_client',          // External API client
+  EVENT_HANDLER = 'event_handler',    // Event handling
+
+  // Infrastructure
+  CONFIGURATION = 'configuration',    // Configuration/setup
+  UTILITY = 'utility',                // Utility/helper function
+  FACTORY = 'factory',                // Object creation
+
+  // UI/Presentation
+  RENDERING = 'rendering',            // UI rendering
+  USER_INPUT = 'user_input',          // User input handling
+
+  // Other
+  UNKNOWN = 'unknown',
+}
+
+/**
  * Represents a node in the Program Dependency Graph
  */
 export interface PDGNode {
@@ -53,8 +117,9 @@ export interface PDGNode {
     isExported?: boolean;
     parameters?: string[];
     returnType?: string;
-    variables?: string[];  // Variables declared/used in this node
-    metrics?: CodeMetrics;  // Code complexity metrics
+    variables?: string[];           // Variables declared/used in this node
+    metrics?: CodeMetrics;          // Code complexity metrics
+    semantics?: SemanticAnnotations; // Semantic annotations for search
   };
 }
 
@@ -140,4 +205,37 @@ export interface SearchResult {
   cyclomaticComplexity: number | null;
   maintainabilityIndex: number | null;
   _distance: number;  // Similarity score (lower = more similar)
+}
+
+// ============================================
+// Intent Analysis Types
+// ============================================
+
+/**
+ * Type of development intent
+ */
+export enum IntentType {
+  FUNCTIONAL = 'functional',           // Functional requirement (business logic)
+  NON_FUNCTIONAL = 'non-functional',   // Non-functional requirement (architecture, performance)
+}
+
+/**
+ * A development intent extracted from user query
+ */
+export interface Intent {
+  type: IntentType;
+  description: string;              // Human-readable description
+  keywords: string[];               // Keywords to search for
+  technicalTerms?: string[];        // Technical terms (e.g., "API", "database")
+  relatedConcepts?: string[];       // Related concepts to expand search
+  confidence?: number;              // Confidence score (0-1)
+}
+
+/**
+ * Result of intent analysis
+ */
+export interface IntentAnalysis {
+  originalQuery: string;
+  intents: Intent[];
+  suggestedSearchTerms?: string[];  // Alternative search terms if needed
 }

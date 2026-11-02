@@ -1,15 +1,38 @@
 import { ProgramDependencyGraphBuilder } from './ProgramDependencyGraphBuilder';
 import { PDGVectorizer } from './vectorization/PDGVectorizer';
 import * as path from 'path';
+import * as readline from 'readline';
 
 /**
- * Demo: Build PDG, vectorize it, and perform semantic search
+ * Interactive Demo: Build PDG, vectorize it, and perform semantic search
  *
  * Prerequisites:
  * 1. Install Ollama: https://ollama.com
  * 2. Pull BGE-M3 model: ollama pull bge-m3
  * 3. Start Ollama service: ollama serve
  */
+
+/**
+ * Create readline interface for user input
+ */
+function createReadlineInterface() {
+  return readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+}
+
+/**
+ * Prompt user for input
+ */
+function promptUser(rl: readline.Interface, question: string): Promise<string> {
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      resolve(answer.trim());
+    });
+  });
+}
+
 async function main() {
   const codebasePath = path.join(__dirname, '..');
 
@@ -45,40 +68,71 @@ async function main() {
     await vectorizer.vectorizeAndStore(pdg);
 
     // ========================================
-    // Step 3: Semantic search examples
+    // Step 3: Interactive semantic search
     // ========================================
-    console.log('\n=== Semantic Search Examples ===\n');
+    console.log('\n=== Interactive Semantic Search ===\n');
+    console.log('You can now search the codebase using natural language queries.');
+    console.log('Examples:');
+    console.log('  - "embedding generation code"');
+    console.log('  - "build dependency graph"');
+    console.log('  - "calculate code complexity metrics"');
+    console.log('  - "payment processing"');
+    console.log('\nType "quit" or "exit" to stop.\n');
 
-    // Example 1: Search for embedding-related code
-    console.log('Example 1: Search for "embedding generation code"');
-    const results1 = await vectorizer.search('embedding generation code', 5);
-    vectorizer.displayResults(results1);
+    const rl = createReadlineInterface();
 
-    // Example 2: Search for graph building
-    console.log('\nExample 2: Search for "build dependency graph"');
-    const results2 = await vectorizer.search('build dependency graph', 5);
-    vectorizer.displayResults(results2);
+    // Interactive search loop
+    let continueSearching = true;
+    while (continueSearching) {
+      const query = await promptUser(rl, 'Enter search query: ');
 
-    // Example 3: Search for metrics calculation
-    console.log('\nExample 3: Search for "calculate code complexity metrics"');
-    const results3 = await vectorizer.search('calculate code complexity metrics', 5);
-    vectorizer.displayResults(results3);
+      // Check for exit commands
+      if (query.toLowerCase() === 'quit' || query.toLowerCase() === 'exit' || query === '') {
+        continueSearching = false;
+        break;
+      }
 
-    // Example 4: Search with complexity filter
-    console.log('\nExample 4: Search for "process data" with low complexity (< 10)');
-    const results4 = await vectorizer.searchWithFilter(
-      'process data',
-      { maxComplexity: 10 },
-      5
-    );
-    vectorizer.displayResults(results4);
+      // Ask for number of results
+      const limitInput = await promptUser(rl, 'Number of results (default 5): ');
+      const limit = limitInput ? parseInt(limitInput, 10) : 5;
+
+      if (isNaN(limit) || limit < 1) {
+        console.log('Invalid number, using default: 5\n');
+      }
+
+      // Ask if user wants to filter by complexity
+      const filterInput = await promptUser(rl, 'Filter by max complexity? (leave empty to skip): ');
+      const maxComplexity = filterInput ? parseInt(filterInput, 10) : undefined;
+
+      console.log(''); // Empty line before results
+
+      // Perform search
+      try {
+        let results;
+        if (maxComplexity !== undefined && !isNaN(maxComplexity)) {
+          results = await vectorizer.searchWithFilter(
+            query,
+            { maxComplexity },
+            limit
+          );
+        } else {
+          results = await vectorizer.search(query, limit);
+        }
+
+        vectorizer.displayResults(results);
+      } catch (error: any) {
+        console.error('Search error:', error.message);
+        console.log('');
+      }
+    }
 
     // ========================================
     // Cleanup
     // ========================================
+    rl.close();
     await vectorizer.close();
 
-    console.log('=== Demo Complete ===\n');
+    console.log('\n=== Demo Complete ===\n');
   } catch (error: any) {
     console.error('\n❌ Error:', error.message);
 
