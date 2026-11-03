@@ -12,7 +12,8 @@
       "Bash(node test-method-metrics.js:*)",
       "Bash(node:*)",
       "Bash(ollama list:*)",
-      "Bash(ollama pull:*)"
+      "Bash(ollama pull:*)",
+      "Read(//Users/aleks/Dev/randevu-backend/**)"
     ],
     "deny": [],
     "ask": []

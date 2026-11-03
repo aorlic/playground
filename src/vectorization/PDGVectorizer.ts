@@ -3,6 +3,7 @@ import { NodeSerializer } from './NodeSerializer';
 import { BGEM3Embedder } from './BGEM3Embedder';
 import { VectorStore } from './VectorStore';
 import { IntentAnalyzer } from '../IntentAnalyzer';
+import { HybridSearcher } from '../HybridSearcher';
 
 /**
  * Main orchestrator for PDG vectorization and semantic search
@@ -12,12 +13,14 @@ import { IntentAnalyzer } from '../IntentAnalyzer';
  * 2. Generate embeddings using BGE-M3 via Ollama
  * 3. Store vectors in LanceDB for fast search
  * 4. (Optional) Use IntentAnalyzer for query expansion
+ * 5. Re-rank with hybrid search (semantic + keyword + metadata)
  */
 export class PDGVectorizer {
   private serializer: NodeSerializer;
   private embedder: BGEM3Embedder;
   private store: VectorStore;
   private intentAnalyzer?: IntentAnalyzer;
+  private hybridSearcher: HybridSearcher;
 
   constructor(
     ollamaUrl?: string,
@@ -28,6 +31,7 @@ export class PDGVectorizer {
     this.serializer = new NodeSerializer();
     this.embedder = new BGEM3Embedder(ollamaUrl, modelName);
     this.store = new VectorStore(dbPath);
+    this.hybridSearcher = new HybridSearcher();
 
     if (enableIntentAnalysis) {
       this.intentAnalyzer = new IntentAnalyzer(ollamaUrl);
@@ -151,11 +155,14 @@ export class PDGVectorizer {
       return await this.searchWithIntents(query, limit);
     }
 
-    // Otherwise, use simple search
+    // Otherwise, use simple search with re-ranking
     const queryEmbedding = await this.embedder.embed(query);
-    const results = await this.store.search(new Float32Array(queryEmbedding), limit);
+    const results = await this.store.search(new Float32Array(queryEmbedding), limit * 2); // Get more for re-ranking
 
-    return results;
+    // Apply hybrid re-ranking
+    const reranked = this.hybridSearcher.rerank(results, query);
+
+    return reranked.slice(0, limit);
   }
 
   /**
@@ -218,10 +225,14 @@ export class PDGVectorizer {
     // Sort by combined score and take top results
     const rankedResults = Array.from(allResults.values())
       .sort((a, b) => b.score - a.score)
-      .slice(0, limit)
+      .slice(0, limit * 2) // Get more candidates for re-ranking
       .map(({ score, ...result }) => result);
 
-    return rankedResults;
+    // Apply hybrid re-ranking
+    const reranked = this.hybridSearcher.rerank(rankedResults, query);
+
+    // Return top N after re-ranking
+    return reranked.slice(0, limit);
   }
 
   /**
@@ -287,17 +298,21 @@ export class PDGVectorizer {
 
     console.log(`Found ${results.length} results:\n`);
 
-    results.forEach((result, i) => {
-      console.log(`${i + 1}. ${result.name}`);
-      console.log(`   File: ${result.filePath}:${result.startLine}-${result.endLine}`);
-      console.log(`   Similarity: ${(1 - result._distance).toFixed(4)} (distance: ${result._distance.toFixed(4)})`);
+    results.forEach((result: any, i) => {
+      const similarity = (1 - result._distance) * 100;
+      const icon = similarity > 30 ? '✅' : similarity > 20 ? '⚠️' : '❌';
 
-      if (result.cyclomaticComplexity !== null) {
-        console.log(`   Complexity: ${result.cyclomaticComplexity}`);
+      console.log(`${i + 1}. ${icon} ${result.name}`);
+      console.log(`   File: ${result.filePath}:${result.startLine}-${result.endLine}`);
+      console.log(`   Similarity: ${similarity.toFixed(1)}% (distance: ${result._distance.toFixed(3)})`);
+
+      // Show hybrid score if available
+      if (result._hybridScore) {
+        console.log(`   Hybrid Score: ${(result._hybridScore * 100).toFixed(1)}%`);
       }
 
-      if (result.maintainabilityIndex !== null) {
-        console.log(`   Maintainability: ${result.maintainabilityIndex.toFixed(2)}`);
+      if (result.cyclomaticComplexity !== null) {
+        console.log(`   Complexity: ${result.cyclomaticComplexity}, MI: ${result.maintainabilityIndex?.toFixed(1)}`);
       }
 
       // Show code snippet (first 100 chars)
