@@ -8,7 +8,6 @@ import {
   ProgramDependencyGraph,
   CodeMetrics,
 } from './types';
-import { SemanticAnalyzer } from './SemanticAnalyzer';
 
 // Import typhonjs-escomplex using require for CommonJS compatibility
 const escomplex = require('typhonjs-escomplex');
@@ -23,7 +22,6 @@ export class ProgramDependencyGraphBuilder {
   private nodeIdCounter: number;
   private edgeIdCounter: number;
   private variableScope: Map<string, string>; // Maps variable names to node IDs
-  private semanticAnalyzer: SemanticAnalyzer;
 
   constructor(private codebasePath: string) {
     this.project = new Project({
@@ -35,7 +33,6 @@ export class ProgramDependencyGraphBuilder {
     this.nodeIdCounter = 0;
     this.edgeIdCounter = 0;
     this.variableScope = new Map();
-    this.semanticAnalyzer = new SemanticAnalyzer();
   }
 
   /**
@@ -250,9 +247,6 @@ export class ProgramDependencyGraphBuilder {
       metrics.lcom = lcom;
     }
 
-    // Extract semantic annotations
-    const semantics = this.semanticAnalyzer.extractAnnotations(classDecl, PDGNodeType.CLASS);
-
     return {
       id: this.generateNodeId(),
       type: PDGNodeType.CLASS,
@@ -264,7 +258,6 @@ export class ProgramDependencyGraphBuilder {
       metadata: {
         isExported: classDecl.isExported(),
         metrics,
-        semantics,
       },
     };
   }
@@ -281,9 +274,6 @@ export class ProgramDependencyGraphBuilder {
     // Calculate metrics using the AST node, passing METHOD type for proper wrapping
     const metrics = this.calculateMetrics(method, PDGNodeType.METHOD);
 
-    // Extract semantic annotations
-    const semantics = this.semanticAnalyzer.extractAnnotations(method, PDGNodeType.METHOD);
-
     return {
       id: this.generateNodeId(),
       type: PDGNodeType.METHOD,
@@ -298,7 +288,6 @@ export class ProgramDependencyGraphBuilder {
         parameters,
         returnType: method.getReturnType()?.getText(),
         metrics,
-        semantics,
       },
     };
   }
@@ -315,9 +304,6 @@ export class ProgramDependencyGraphBuilder {
     // Calculate metrics using the AST node
     const metrics = this.calculateMetrics(funcDecl);
 
-    // Extract semantic annotations
-    const semantics = this.semanticAnalyzer.extractAnnotations(funcDecl, PDGNodeType.FUNCTION);
-
     return {
       id: this.generateNodeId(),
       type: PDGNodeType.FUNCTION,
@@ -332,7 +318,6 @@ export class ProgramDependencyGraphBuilder {
         parameters,
         returnType: funcDecl.getReturnType()?.getText(),
         metrics,
-        semantics,
       },
     };
   }

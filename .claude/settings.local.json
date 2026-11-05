@@ -13,7 +13,8 @@
       "Bash(node:*)",
       "Bash(ollama list:*)",
       "Bash(ollama pull:*)",
-      "Read(//Users/aleks/Dev/randevu-backend/**)"
+      "Read(//Users/aleks/Dev/randevu-backend/**)",
+      "Bash(npm run analyze-randevu:*)"
     ],
     "deny": [],
     "ask": []

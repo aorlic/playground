@@ -1,5 +1,5 @@
 import { ProgramDependencyGraphBuilder } from './ProgramDependencyGraphBuilder';
-import { PDGVectorizer } from './vectorization/PDGVectorizer';
+import { QualityAnalyzer } from './QualityAnalyzer';
 import * as path from 'path';
 
 /**
@@ -27,7 +27,6 @@ async function analyzeRandevuBackend() {
 
   for (const service of services) {
     const servicePath = path.join(randevuPath, 'services', service);
-    const tsconfigPath = path.join(servicePath, 'tsconfig.json');
 
     console.log(`\n📦 Analyzing service: ${service}`);
     console.log(`   Path: ${servicePath}`);
@@ -53,7 +52,6 @@ async function analyzeRandevuBackend() {
   // Build PDG for libraries
   for (const lib of libs) {
     const libPath = path.join(randevuPath, 'libs', lib);
-    const tsconfigPath = path.join(libPath, 'tsconfig.json');
 
     console.log(`\n📚 Analyzing library: ${lib}`);
     console.log(`   Path: ${libPath}`);
@@ -80,8 +78,8 @@ async function analyzeRandevuBackend() {
   console.log(`Total nodes across all services: ${totalNodes}`);
   console.log(`Services/libs analyzed: ${allPdgs.length}`);
 
-  // Combine all PDGs for vectorization
-  console.log(`\n=== Vectorizing Combined Codebase ===\n`);
+  // Combine all PDGs for quality analysis
+  console.log(`\n=== Quality Analysis ===\n`);
 
   const combinedPdg = {
     nodes: new Map(),
@@ -114,21 +112,12 @@ async function analyzeRandevuBackend() {
 
   console.log(`Combined PDG: ${combinedPdg.nodes.size} nodes, ${combinedPdg.edges.length} edges\n`);
 
-  // Vectorize and store
-  const vectorizer = new PDGVectorizer(
-    'http://127.0.0.1:11434',
-    'bge-m3',
-    './data/randevu_vectors',
-    true  // Enable intent analysis
-  );
+  // Run quality analysis
+  const qualityAnalyzer = new QualityAnalyzer();
+  const report = qualityAnalyzer.generateReport(combinedPdg, 5);
+  console.log(report);
 
-  await vectorizer.initialize();
-  await vectorizer.vectorizeAndStore(combinedPdg);
-
-  console.log('\n✓ Randevu backend analysis complete!');
-  console.log('Vector database stored at: ./data/randevu_vectors\n');
-
-  await vectorizer.close();
+  console.log('\n✓ Randevu backend analysis complete!\n');
 }
 
 analyzeRandevuBackend().catch(console.error);
