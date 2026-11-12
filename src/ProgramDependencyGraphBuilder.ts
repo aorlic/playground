@@ -1,5 +1,6 @@
 import { Project, SourceFile, Node, SyntaxKind, ts } from 'ts-morph';
 import * as path from 'path';
+import * as fs from 'fs';
 import {
   PDGNode,
   PDGEdge,
@@ -24,10 +25,26 @@ export class ProgramDependencyGraphBuilder {
   private variableScope: Map<string, string>; // Maps variable names to node IDs
 
   constructor(private codebasePath: string) {
+    const tsconfigPath = path.join(codebasePath, 'tsconfig.json');
+
     this.project = new Project({
-      tsConfigFilePath: path.join(codebasePath, 'tsconfig.json'),
+      tsConfigFilePath: tsconfigPath,
       skipAddingFilesFromTsConfig: false,
+      skipFileDependencyResolution: true, // Skip resolving node_modules dependencies
     });
+
+    // If ts-morph didn't load files, manually add them
+    const sourceFiles = this.project.getSourceFiles();
+
+    if (sourceFiles.length === 0) {
+      // Fallback: manually add files from src directory
+      const srcPath = path.join(codebasePath, 'src');
+
+      if (fs.existsSync(srcPath)) {
+        this.project.addSourceFilesAtPaths(`${srcPath}/**/*.{ts,tsx}`);
+      }
+    }
+
     this.nodes = new Map();
     this.edges = [];
     this.nodeIdCounter = 0;
@@ -228,6 +245,21 @@ export class ProgramDependencyGraphBuilder {
       // Process function body
       this.processFunctionBody(funcDecl, funcNode.id, filePath);
     });
+
+    // Process variable declarations with arrow functions (e.g., export const foo = () => {})
+    sourceFile.getVariableDeclarations().forEach((varDecl) => {
+      const initializer = varDecl.getInitializer();
+
+      // Check if the initializer is an arrow function or function expression
+      if (initializer && (initializer.getKind() === SyntaxKind.ArrowFunction ||
+                          initializer.getKind() === SyntaxKind.FunctionExpression)) {
+        const funcNode = this.createFunctionNodeFromVariable(varDecl, filePath);
+        this.nodes.set(funcNode.id, funcNode);
+
+        // Process function body
+        this.processArrowFunctionBody(initializer as any, funcNode.id, filePath);
+      }
+    });
   }
 
   /**
@@ -320,6 +352,63 @@ export class ProgramDependencyGraphBuilder {
         metrics,
       },
     };
+  }
+
+  /**
+   * Create a function node from a variable declaration with arrow function
+   */
+  private createFunctionNodeFromVariable(varDecl: any, filePath: string): PDGNode {
+    const name = varDecl.getName() || '<anonymous>';
+    const initializer = varDecl.getInitializer();
+    const startLine = varDecl.getStartLineNumber();
+    const endLine = varDecl.getEndLineNumber();
+
+    // Get parameters from the arrow function
+    const parameters = initializer.getParameters
+      ? initializer.getParameters().map((p: any) => p.getName())
+      : [];
+
+    // Calculate metrics using the variable declaration node
+    const metrics = this.calculateMetrics(varDecl);
+
+    // Check if the variable is exported
+    const variableStatement = varDecl.getVariableStatement();
+    const isExported = variableStatement ? variableStatement.isExported() : false;
+
+    return {
+      id: this.generateNodeId(),
+      type: PDGNodeType.FUNCTION,
+      name,
+      filePath,
+      startLine,
+      endLine,
+      code: varDecl.getText(),
+      metadata: {
+        isAsync: initializer.isAsync ? initializer.isAsync() : false,
+        isExported,
+        parameters,
+        returnType: initializer.getReturnType ? initializer.getReturnType()?.getText() : undefined,
+        metrics,
+      },
+    };
+  }
+
+  /**
+   * Process arrow function body for statements and dependencies
+   */
+  private processArrowFunctionBody(arrowFunc: any, parentId: string, filePath: string): void {
+    const body = arrowFunc.getBody();
+    if (!body) return;
+
+    // Arrow functions can have expression bodies or block bodies
+    if (body.getKind() === SyntaxKind.Block) {
+      this.processStatements(body, parentId, filePath);
+    } else {
+      // Expression body - treat as a single statement
+      const stmtNode = this.createStatementNode(body, filePath);
+      this.nodes.set(stmtNode.id, stmtNode);
+      this.addEdge(PDGEdgeType.CONTAINS, parentId, stmtNode.id);
+    }
   }
 
   /**

@@ -1,83 +1,66 @@
-# PDG Vectorization with BGE-M3 and LanceDB
+# Code Quality Analysis System
 
-A TypeScript implementation for building Program Dependency Graphs (PDG) from codebases, calculating code complexity metrics, and enabling semantic code search using BGE-M3 embeddings and LanceDB vector storage.
+A TypeScript-based static code analysis system that identifies low-quality code and provides interactive test coverage analysis.
 
 ## Features
 
-✅ **Program Dependency Graph (PDG)** - Parse TypeScript/JavaScript codebases into structured graphs
-✅ **Code Metrics** - Calculate Cyclomatic Complexity, Maintainability Index, Halstead metrics, and LCOM
-✅ **Semantic Search** - Find code using natural language queries
-✅ **BGE-M3 Embeddings** - 8192 token context, 1024-dim vectors, 100+ languages
-✅ **LanceDB Storage** - Fast vector similarity search with ANN indexing
+✅ **Program Dependency Graph (PDG)** - Parse TypeScript/JavaScript codebases into graph representation
+✅ **Quality Metrics** - Calculate CC, MI, LCOM, Halstead Volume
+✅ **Quality Scoring** - Rank nodes by quality (0-100 scale)
+✅ **Interactive Selection** - Select nodes from terminal UI
+✅ **Test Coverage Analysis** - Estimate test coverage for any node
+✅ **Smart Recommendations** - Context-aware advice for improvement
+✅ **Git Integration** - Analyze repositories directly from GitHub/GitLab/Bitbucket
+
+## Quick Start
+
+### Option 1: Analyze Local Directory
+
+```bash
+# Install dependencies
+npm install
+
+# Run interactive quality analysis
+npm run demo
+```
+
+### Option 2: Analyze Git Repository (NEW!)
+
+```bash
+# 1. Copy environment template
+cp .env.example .env
+
+# 2. Edit .env with your repository URL and token
+# GIT_REPO_URL=https://github.com/username/repo.git
+# GIT_BRANCH=main
+# GIT_TOKEN=your_token
+
+# 3. Run analysis (automatically clones repo)
+npm run demo
+```
+
+**See**: [GIT_SETUP_QUICK_START.md](GIT_SETUP_QUICK_START.md) for 5-minute Git setup guide
 
 ## Architecture
 
 ```
-Codebase → PDG Builder → Metrics → Serialization → BGE-M3 Embeddings → LanceDB → Search
-```
-
-## Prerequisites
-
-### 1. Install Ollama
-
-```bash
-# macOS/Linux
-curl -fsSL https://ollama.com/install.sh | sh
-
-# Or download from https://ollama.com
-```
-
-### 2. Pull BGE-M3 Model
-
-```bash
-ollama pull bge-m3
-```
-
-### 3. Start Ollama Service
-
-```bash
-ollama serve
-```
-
-Keep this running in a separate terminal.
-
-### 4. Install Node.js Dependencies
-
-```bash
-npm install
-```
-
-## Usage
-
-### Build PDG and Vectorize Codebase
-
-```bash
-npm run vectorize
-```
-
-This will:
-1. Parse the codebase and build the PDG
-2. Calculate code complexity metrics
-3. Generate embeddings using BGE-M3 (via Ollama)
-4. Store vectors in LanceDB at `./data/pdg_vectors`
-
-### Semantic Search Examples
-
-The demo script includes several search examples:
-
-```typescript
-// Search for embedding-related code
-await vectorizer.search('embedding generation code', 5);
-
-// Search for graph building logic
-await vectorizer.search('build dependency graph', 5);
-
-// Search with complexity filter (only simple code)
-await vectorizer.searchWithFilter(
-  'process data',
-  { maxComplexity: 10 },
-  5
-);
+User Query
+    ↓
+[ProgramDependencyGraphBuilder]
+    ↓
+Program Dependency Graph (nodes + edges + metrics)
+    ↓
+[QualityAnalyzer]
+    ↓
+Quality Report (top 5 worst nodes with Node IDs)
+    ↓
+[Interactive Terminal UI]
+    ↓
+User selects Node ID
+    ↓
+[TestCoverageAnalyzer]
+    ↓
+Coverage Report + Recommendations
 ```
 
 ## Project Structure

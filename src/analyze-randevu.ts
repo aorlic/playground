@@ -1,15 +1,48 @@
 import { ProgramDependencyGraphBuilder } from './ProgramDependencyGraphBuilder';
 import { QualityAnalyzer } from './QualityAnalyzer';
+import { GitRepositoryManager } from './GitRepositoryManager';
 import * as path from 'path';
+import * as dotenv from 'dotenv';
+
+// Load environment variables
+dotenv.config();
 
 /**
- * Analyze the randevu-backend codebase
+ * Analyze the randevu-backend codebase from Git repository
  */
 async function analyzeRandevuBackend() {
   console.log('=== Analyzing Randevu Backend ===\n');
 
-  // Path to randevu-backend
-  const randevuPath = '/Users/aleks/Dev/randevu-backend';
+  let randevuPath: string;
+  let gitManager: GitRepositoryManager | null = null;
+  let cloneResult: any = null;
+
+  // Check if Git configuration exists
+  if (process.env.GIT_REPO_URL && process.env.GIT_BRANCH) {
+    // Use Git repository
+    console.log('Using Git repository from .env configuration\n');
+
+    gitManager = new GitRepositoryManager();
+    try {
+      cloneResult = await gitManager.ensureRepository({
+        url: process.env.GIT_REPO_URL,
+        branch: process.env.GIT_BRANCH,
+        token: process.env.GIT_TOKEN,
+        username: process.env.GIT_USERNAME,
+        cacheDir: process.env.REPO_CACHE_DIR
+      });
+      randevuPath = cloneResult.repoPath;
+    } catch (error: any) {
+      console.error('❌ Git Error:', error.message);
+      console.log('\nPlease check your .env configuration and try again.\n');
+      process.exit(1);
+    }
+  } else {
+    // Fallback to hardcoded path (for backward compatibility)
+    console.log('No Git configuration found in .env');
+    console.log('Using fallback path (to use Git, copy .env.example to .env)\n');
+    randevuPath = '/Users/aleks/Dev/randevu-backend';
+  }
 
   console.log(`Analyzing codebase at: ${randevuPath}\n`);
 
@@ -118,6 +151,13 @@ async function analyzeRandevuBackend() {
   console.log(report);
 
   console.log('\n✓ Randevu backend analysis complete!\n');
+
+  // Cleanup cloned repository if using Git
+  if (gitManager && cloneResult) {
+    console.log('Cleaning up cloned repository...');
+    await gitManager.cleanup(cloneResult.repoPath);
+    console.log('✓ Cleanup complete\n');
+  }
 }
 
 analyzeRandevuBackend().catch(console.error);

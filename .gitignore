@@ -14,3 +14,9 @@ npm-debug.log*
 # IDE
 .vscode/
 .idea/
+
+# Environment variables
+.env
+
+# Cloned repositories cache
+.code-quality-analysis/

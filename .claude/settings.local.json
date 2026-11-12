@@ -14,7 +14,10 @@
       "Bash(ollama list:*)",
       "Bash(ollama pull:*)",
       "Read(//Users/aleks/Dev/randevu-backend/**)",
-      "Bash(npm run analyze-randevu:*)"
+      "Bash(npm run analyze-randevu:*)",
+      "Bash(npm run demo:*)",
+      "Bash(cat:*)",
+      "Bash(timeout 60 npm run demo:*)"
     ],
     "deny": [],
     "ask": []

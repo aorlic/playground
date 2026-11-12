@@ -75,8 +75,12 @@ export class QualityAnalyzer {
     const results: NodeQuality[] = [];
 
     pdg.nodes.forEach((node) => {
-      // Only analyze meaningful nodes (skip statements)
-      if (node.type === PDGNodeType.STATEMENT) return;
+      // Only analyze meaningful nodes (skip statements and variable declarations)
+      // Variable declarations are data, not logic, and rarely have meaningful metrics
+      if (node.type === PDGNodeType.STATEMENT ||
+          node.type === PDGNodeType.VARIABLE_DECLARATION) {
+        return;
+      }
 
       const qualityScore = this.calculateQualityScore(node);
       const issues = this.getIssues(node);
@@ -141,6 +145,7 @@ export class QualityAnalyzer {
       const metrics = node.metadata?.metrics;
 
       lines.push(`${index + 1}. ${node.type}: ${node.name}`);
+      lines.push(`   Node ID: ${node.id}`);
       lines.push(`   Quality Score: ${qualityScore.toFixed(1)}/100`);
       lines.push(`   Location: ${node.filePath}:${node.startLine}-${node.endLine}`);
 
