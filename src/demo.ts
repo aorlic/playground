@@ -3,6 +3,7 @@ import { QualityAnalyzer } from './QualityAnalyzer';
 import { TestCoverageAnalyzer } from './TestCoverageAnalyzer';
 import { GitRepositoryManager } from './GitRepositoryManager';
 import { MonorepoDetector } from './MonorepoDetector';
+import { ClaudeRefactoringService } from './ClaudeRefactoringService';
 import * as readline from 'readline';
 import * as dotenv from 'dotenv';
 
@@ -322,19 +323,17 @@ async function performRefactoring(
 
   // Step 1: Create git branch
   console.log('\n📋 Step 1: Creating git branch...');
-  const branchName = `refactor/${selectedNode.name.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase()}`;
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
+  const baseBranchName = `refactor/${selectedNode.name.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase()}`;
+  // Always include timestamp to ensure unique branch names
+  const branchName = `${baseBranchName}-${timestamp}`;
 
+  // Create the local branch
   try {
     execSync(`git checkout -b ${branchName}`, { cwd: projectPath, stdio: 'pipe' });
     console.log(`✅ Created branch: ${branchName}`);
   } catch (error: any) {
-    // Branch might already exist, try to checkout
-    try {
-      execSync(`git checkout ${branchName}`, { cwd: projectPath, stdio: 'pipe' });
-      console.log(`✅ Switched to existing branch: ${branchName}`);
-    } catch (checkoutError: any) {
-      throw new Error(`Failed to create/checkout branch: ${checkoutError.message}`);
-    }
+    throw new Error(`Failed to create branch: ${error.message}`);
   }
 
   // Step 2: Read the code file
@@ -353,41 +352,133 @@ async function performRefactoring(
 
   console.log(`✅ Read ${endLine - startLine} lines from ${path.basename(filePath)}`);
 
-  // Step 3: Refactor the code
-  console.log('\n🤖 Step 3: Refactoring code...');
+  // Step 3: Refactor the code using Claude API
+  console.log('\n🤖 Step 3: AI-powered refactoring with Claude...');
   console.log('\nOriginal code:');
   console.log('─'.repeat(80));
   console.log(codeToRefactor.substring(0, 500) + (codeToRefactor.length > 500 ? '...' : ''));
   console.log('─'.repeat(80));
 
-  console.log('\n⚠️  AI-assisted refactoring is not yet implemented.');
-  console.log('For now, please manually refactor the code in your editor.');
-  console.log(`\nFile: ${filePath}`);
-  console.log(`Lines: ${selectedNode.startLine}-${selectedNode.endLine}\n`);
-  console.log('Once you have refactored the code, save the file and press Enter to continue...\n');
+  // Check if Anthropic API key is configured
+  const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
+  if (!anthropicApiKey) {
+    console.log('\n❌ Anthropic API key not configured.');
+    console.log('Please add ANTHROPIC_API_KEY to your .env file.');
+    console.log('Get your API key from: https://console.anthropic.com/settings/keys\n');
+    console.log('Falling back to manual refactoring...');
+    console.log(`\nFile: ${filePath}`);
+    console.log(`Lines: ${selectedNode.startLine}-${selectedNode.endLine}\n`);
+    console.log('Please manually refactor the code in your editor, save it, and press Enter to continue...\n');
 
-  await new Promise<void>((resolve) => {
-    rl.question('', () => resolve());
-  });
+    await new Promise<void>((resolve) => {
+      rl.question('', () => resolve());
+    });
+  } else {
+    try {
+      console.log('\n⏳ Sending code to Claude for refactoring...');
+
+      const claudeService = new ClaudeRefactoringService(anthropicApiKey);
+      const qualityAnalyzer = new QualityAnalyzer();
+
+      const refactoringResult = await claudeService.refactorCode({
+        code: codeToRefactor,
+        filePath,
+        nodeType: selectedNode.type,
+        nodeName: selectedNode.name,
+        currentMetrics,
+        issues: qualityAnalyzer.getIssues(selectedNode),
+      });
+
+      console.log('✅ Refactoring complete!\n');
+
+      // Show explanation
+      console.log('📝 Explanation:');
+      console.log(refactoringResult.explanation);
+      console.log('');
+
+      // Show improvements
+      if (refactoringResult.improvements.length > 0) {
+        console.log('✨ Improvements:');
+        refactoringResult.improvements.forEach(imp => {
+          console.log(`   - ${imp}`);
+        });
+        console.log('');
+      }
+
+      // Show refactored code preview
+      console.log('Refactored code preview:');
+      console.log('─'.repeat(80));
+      const preview = refactoringResult.refactoredCode.substring(0, 500);
+      console.log(preview + (refactoringResult.refactoredCode.length > 500 ? '...' : ''));
+      console.log('─'.repeat(80));
+
+      // Validate refactored code
+      const validation = await claudeService.validateRefactoredCode(codeToRefactor, refactoringResult.refactoredCode);
+      if (!validation.valid) {
+        console.log('\n⚠️  Validation warnings:');
+        validation.errors.forEach(err => console.log(`   - ${err}`));
+      }
+
+      // Ask for approval
+      console.log('\n');
+      const approved = await new Promise<boolean>((resolve) => {
+        rl.question('Apply this refactoring? (y/n): ', (answer) => {
+          resolve(answer.toLowerCase() === 'y');
+        });
+      });
+
+      if (approved) {
+        // Replace the code in the file
+        lines.splice(startLine, endLine - startLine, ...refactoringResult.refactoredCode.split('\n'));
+        fs.writeFileSync(filePath, lines.join('\n'), 'utf-8');
+        console.log('✅ Refactored code applied to file');
+      } else {
+        console.log('❌ Refactoring cancelled. Original code unchanged.');
+        console.log('\nYou can manually refactor the code in your editor if desired.');
+        console.log('Press Enter to continue with original code...\n');
+        await new Promise<void>((resolve) => {
+          rl.question('', () => resolve());
+        });
+      }
+    } catch (error: any) {
+      console.log(`\n❌ Error during AI refactoring: ${error.message}`);
+      console.log('\nFalling back to manual refactoring...');
+      console.log(`\nFile: ${filePath}`);
+      console.log(`Lines: ${selectedNode.startLine}-${selectedNode.endLine}\n`);
+      console.log('Please manually refactor the code in your editor, save it, and press Enter to continue...\n');
+
+      await new Promise<void>((resolve) => {
+        rl.question('', () => resolve());
+      });
+    }
+  }
 
   // Step 4: Re-analyze metrics
   console.log('\n📊 Step 4: Re-analyzing metrics...');
 
   const ProgramDependencyGraphBuilder = require('./ProgramDependencyGraphBuilder').ProgramDependencyGraphBuilder;
 
-  // Determine the subproject path (remove subproject prefix from node ID to get clean path)
-  const subprojectName = selectedNode.metadata?.subproject || '';
-  const subprojectPath = path.dirname(path.dirname(filePath)); // Go up to find tsconfig.json
+  // Find the directory containing tsconfig.json by walking up from the file
+  let subprojectPath = path.dirname(filePath);
+  while (subprojectPath !== path.dirname(subprojectPath)) { // While not at root
+    const tsconfigPath = path.join(subprojectPath, 'tsconfig.json');
+    if (fs.existsSync(tsconfigPath)) {
+      break;
+    }
+    subprojectPath = path.dirname(subprojectPath);
+  }
+
+  console.log(`   Subproject path: ${subprojectPath}`);
 
   let newMetrics = currentMetrics;
   let newScore = currentScore;
+  let refactoredNode: any = null;
 
   try {
     const builder = new ProgramDependencyGraphBuilder(subprojectPath);
     const newPdg = builder.build();
 
     // Find the refactored node by matching file path and name
-    let refactoredNode = null;
     for (const [nodeId, node] of newPdg.nodes) {
       if (node.filePath === filePath && node.name === selectedNode.name) {
         refactoredNode = node;
@@ -430,6 +521,12 @@ async function performRefactoring(
   const volAfter = newMetrics.halsteadVolume || 0;
   const volChange = volAfter - volBefore;
   console.log(`${'Halstead Volume'.padEnd(30)} ${volBefore.toFixed(0).padEnd(15)} ${volAfter.toFixed(0).padEnd(15)} ${(volChange > 0 ? '+' : '') + volChange.toFixed(0)}`);
+
+  // Use logical SLOC (Source Lines of Code) - counts only executable statements
+  const locBefore = currentMetrics.sloc?.logical || (selectedNode.endLine - selectedNode.startLine + 1);
+  const locAfter = newMetrics.sloc?.logical || locBefore;
+  const locChange = locAfter - locBefore;
+  console.log(`${'Lines of Code (logical)'.padEnd(30)} ${locBefore.toString().padEnd(15)} ${locAfter.toString().padEnd(15)} ${(locChange > 0 ? '+' : '') + locChange}`);
   console.log('─'.repeat(80));
 
   // Step 6: Commit changes
@@ -444,10 +541,17 @@ Quality Score: ${currentScore.toFixed(1)} → ${newScore.toFixed(1)} (${scoreCha
 Cyclomatic Complexity: ${ccBefore} → ${ccAfter} (${ccChange > 0 ? '+' : ''}${ccChange})
 Maintainability Index: ${miBefore.toFixed(1)} → ${miAfter.toFixed(1)} (${miChange > 0 ? '+' : ''}${miChange.toFixed(1)})
 Halstead Volume: ${volBefore.toFixed(0)} → ${volAfter.toFixed(0)} (${volChange > 0 ? '+' : ''}${volChange.toFixed(0)})
+Lines of Code (logical): ${locBefore} → ${locAfter} (${locChange > 0 ? '+' : ''}${locChange})
 
 🤖 Generated with Claude Code Quality Analyzer`;
 
-    execSync(`git commit -m "${commitMessage.replace(/"/g, '\\"')}"`, { cwd: projectPath, stdio: 'pipe' });
+    // Write commit message to temporary file to avoid shell escaping issues
+    const absoluteProjectPath = path.resolve(projectPath);
+    const tempCommitFile = path.join(absoluteProjectPath, '.git', 'COMMIT_EDITMSG_TEMP');
+    fs.writeFileSync(tempCommitFile, commitMessage, 'utf-8');
+    execSync(`git commit -F "${tempCommitFile}"`, { cwd: projectPath, stdio: 'pipe' });
+    fs.unlinkSync(tempCommitFile);
+
     console.log('✅ Changes committed');
   } catch (error: any) {
     console.log(`⚠️  Error committing: ${error.message}`);
@@ -460,12 +564,54 @@ Halstead Volume: ${volBefore.toFixed(0)} → ${volAfter.toFixed(0)} (${volChange
     if (answer.toLowerCase() === 'y') {
       try {
         // Push branch
-        execSync(`git push -u origin ${branchName}`, { cwd: projectPath, stdio: 'inherit' });
-        console.log('✅ Branch pushed to remote');
+        try {
+          execSync(`git push -u origin ${branchName}`, { cwd: projectPath, stdio: 'inherit' });
+          console.log('✅ Branch pushed to remote');
+        } catch (pushError: any) {
+          // Check if remote branch exists
+          if (pushError.message.includes('rejected') || pushError.message.includes('fetch first')) {
+            console.log('\n⚠️  Remote branch already exists with different commits.');
+            console.log('This usually means a previous refactoring created this branch.\n');
 
-        // Create PR with gh CLI
-        const prTitle = `refactor: improve ${selectedNode.name}`;
-        const prBody = `## Refactoring Summary
+            // Use readline to ask for force push
+            const forceAnswer = await new Promise<string>((resolve) => {
+              rl.question('Force push to overwrite remote branch? (y/n): ', resolve);
+            });
+
+            if (forceAnswer.toLowerCase() === 'y') {
+              execSync(`git push -u origin ${branchName} --force`, { cwd: projectPath, stdio: 'inherit' });
+              console.log('✅ Branch force-pushed to remote');
+            } else {
+              console.log('\n⚠️  Push cancelled. Changes are committed locally but not pushed.');
+              console.log(`   You can manually push with: git push -u origin ${branchName} --force\n`);
+              console.log('Press Enter to continue...');
+              rl.question('', () => {
+                showNodeMenu(selectedNode, combinedPdg, projectPath, gitManager, cloneResult, rl, askForNodeId, qualityAnalyzer);
+              });
+              return;
+            }
+          } else {
+            throw pushError;
+          }
+        }
+
+        // Check if gh CLI is available
+        let ghAvailable = false;
+        try {
+          execSync('gh --version', { stdio: 'pipe' });
+          ghAvailable = true;
+        } catch (error) {
+          ghAvailable = false;
+        }
+
+        if (!ghAvailable) {
+          console.log('\n⚠️  GitHub CLI (gh) is not installed.');
+          console.log('\n📋 Please create the PR manually with the following details:\n');
+
+          const prTitle = `refactor: improve ${selectedNode.name}`;
+          console.log(`Title: ${prTitle}\n`);
+
+          const prBody = `## Refactoring Summary
 
 **Node:** \`${selectedNode.type}\` - \`${selectedNode.name}\`
 **Location:** \`${path.basename(filePath)}:${selectedNode.startLine}-${selectedNode.endLine}\`
@@ -478,13 +624,60 @@ Halstead Volume: ${volBefore.toFixed(0)} → ${volAfter.toFixed(0)} (${volChange
 | Cyclomatic Complexity | ${ccBefore} | ${ccAfter} | ${ccChange > 0 ? '+' : ''}${ccChange} |
 | Maintainability Index | ${miBefore.toFixed(1)} | ${miAfter.toFixed(1)} | ${miChange > 0 ? '+' : ''}${miChange.toFixed(1)} |
 | Halstead Volume | ${volBefore.toFixed(0)} | ${volAfter.toFixed(0)} | ${volChange > 0 ? '+' : ''}${volChange.toFixed(0)} |
+| Lines of Code (logical) | ${locBefore} | ${locAfter} | ${locChange > 0 ? '+' : ''}${locChange} |
 
 🤖 Generated with [Claude Code Quality Analyzer](https://github.com/anthropics/claude-code)`;
 
-        const prCommand = `gh pr create --title "${prTitle}" --body "${prBody.replace(/"/g, '\\"')}"`;
-        execSync(prCommand, { cwd: projectPath, stdio: 'inherit' });
+          console.log('Description:');
+          console.log('---');
+          console.log(prBody);
+          console.log('---\n');
 
-        console.log('\n✅ Pull Request created successfully!');
+          // Get remote URL to construct PR URL
+          try {
+            const remoteUrl = execSync('git remote get-url origin', { cwd: projectPath, encoding: 'utf-8' }).trim();
+            const match = remoteUrl.match(/github\.com[:/](.+?)\/(.+?)(\.git)?$/);
+            if (match) {
+              const [, owner, repo] = match;
+              const prUrl = `https://github.com/${owner}/${repo}/compare/${branchName}?expand=1`;
+              console.log(`🔗 Create PR here: ${prUrl}\n`);
+            }
+          } catch (error) {
+            console.log('💡 Or go to your repository on GitHub and create a PR from the pushed branch.\n');
+          }
+
+          console.log('To install GitHub CLI: https://cli.github.com/\n');
+        } else {
+          // Create PR with gh CLI
+          const prTitle = `refactor: improve ${selectedNode.name}`;
+          const prBody = `## Refactoring Summary
+
+**Node:** \`${selectedNode.type}\` - \`${selectedNode.name}\`
+**Location:** \`${path.basename(filePath)}:${selectedNode.startLine}-${selectedNode.endLine}\`
+
+## Metrics Improvement
+
+| Metric | Before | After | Change |
+|--------|--------|-------|--------|
+| **Quality Score** | ${currentScore.toFixed(1)} | ${newScore.toFixed(1)} | **${scoreChange > 0 ? '+' : ''}${scoreChange.toFixed(1)}** |
+| Cyclomatic Complexity | ${ccBefore} | ${ccAfter} | ${ccChange > 0 ? '+' : ''}${ccChange} |
+| Maintainability Index | ${miBefore.toFixed(1)} | ${miAfter.toFixed(1)} | ${miChange > 0 ? '+' : ''}${miChange.toFixed(1)} |
+| Halstead Volume | ${volBefore.toFixed(0)} | ${volAfter.toFixed(0)} | ${volChange > 0 ? '+' : ''}${volChange.toFixed(0)} |
+| Lines of Code (logical) | ${locBefore} | ${locAfter} | ${locChange > 0 ? '+' : ''}${locChange} |
+
+🤖 Generated with [Claude Code Quality Analyzer](https://github.com/anthropics/claude-code)`;
+
+          // Write PR body to temporary file to avoid shell escaping issues
+          const absoluteProjectPath = path.resolve(projectPath);
+          const tempPrBodyFile = path.join(absoluteProjectPath, '.git', 'PR_BODY_TEMP.md');
+          fs.writeFileSync(tempPrBodyFile, prBody, 'utf-8');
+
+          // Create PR using the body file
+          execSync(`gh pr create --title "${prTitle}" --body-file "${tempPrBodyFile}"`, { cwd: projectPath, stdio: 'inherit' });
+          fs.unlinkSync(tempPrBodyFile);
+
+          console.log('\n✅ Pull Request created successfully!');
+        }
       } catch (error: any) {
         console.log(`\n❌ Error creating PR: ${error.message}`);
         console.log('\nYou can manually create the PR from the pushed branch.');

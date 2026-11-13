@@ -17,7 +17,11 @@
       "Bash(npm run analyze-randevu:*)",
       "Bash(npm run demo:*)",
       "Bash(cat:*)",
-      "Bash(timeout 60 npm run demo:*)"
+      "Bash(timeout 60 npm run demo:*)",
+      "Bash(git -C /Users/aleks/Dev/casper/playground/cb_root/photos-portal checkout master)",
+      "Bash(git -C /Users/aleks/Dev/casper/playground/cb_root/photos-portal branch:*)",
+      "Bash(git -C /Users/aleks/Dev/casper/playground/cb_root/photos-portal status)",
+      "Bash(gh pr list:*)"
     ],
     "deny": [],
     "ask": []

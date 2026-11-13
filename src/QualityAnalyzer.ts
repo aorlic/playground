@@ -99,7 +99,7 @@ export class QualityAnalyzer {
   /**
    * Gets detailed issues for a node
    */
-  private getIssues(node: PDGNode): string[] {
+  public getIssues(node: PDGNode): string[] {
     const issues: string[] = [];
     const metrics = node.metadata?.metrics;
     if (!metrics) return issues;
