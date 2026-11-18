@@ -4,6 +4,8 @@ import { TestCoverageAnalyzer } from './TestCoverageAnalyzer';
 import { GitRepositoryManager } from './GitRepositoryManager';
 import { MonorepoDetector } from './MonorepoDetector';
 import { ClaudeRefactoringService } from './ClaudeRefactoringService';
+import { TestRunner } from './TestRunner';
+import { ClaudeTestGenerator } from './ClaudeTestGenerator';
 import * as readline from 'readline';
 import * as dotenv from 'dotenv';
 
@@ -280,8 +282,9 @@ async function refactorNode(
 
   console.log('⚠️  Refactoring workflow:');
   console.log('   1. Create git branch: refactor/<node-name>');
-  console.log('   2. Refactor the code (AI-assisted)');
-  console.log('   3. Create PR with metrics improvement\n');
+  console.log('   2. Validate and generate tests (ensure 100% coverage)');
+  console.log('   3. Refactor the code (AI-assisted)');
+  console.log('   4. Create PR with tests and refactored code\n');
 
   rl.question('Proceed with refactoring? (y/n): ', async (answer) => {
     if (answer.toLowerCase() !== 'y') {
@@ -291,7 +294,53 @@ async function refactorNode(
     }
 
     try {
-      await performRefactoring(selectedNode, combinedPdg, projectPath, currentMetrics, currentScore, qualityAnalyzer, rl, gitManager, cloneResult, askForNodeId);
+      // Step 1: Create git branch FIRST
+      console.log('\n📋 Step 1: Creating git branch...');
+      const { execSync } = require('child_process');
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
+      const baseBranchName = `refactor/${selectedNode.name.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase()}`;
+      const branchName = `${baseBranchName}-${timestamp}`;
+
+      try {
+        execSync(`git checkout -b ${branchName}`, { cwd: projectPath, stdio: 'pipe' });
+        console.log(`✅ Created branch: ${branchName}`);
+      } catch (error: any) {
+        throw new Error(`Failed to create branch: ${error.message}`);
+      }
+
+      // Step 2: Testing Harness - in the branch
+      console.log('\n🧪 Step 2: Testing Harness - Validation & Coverage Analysis...');
+
+      const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
+      const testingResult = await runTestingHarness(
+        selectedNode,
+        projectPath,
+        combinedPdg,
+        qualityAnalyzer,
+        currentMetrics,
+        anthropicApiKey,
+        rl
+      );
+
+      if (!testingResult.passed) {
+        console.log('\n❌ Testing validation failed. Refactoring aborted.\n');
+        // Cleanup: delete the branch
+        try {
+          execSync(`git checkout master`, { cwd: projectPath, stdio: 'pipe' });
+          execSync(`git branch -D ${branchName}`, { cwd: projectPath, stdio: 'pipe' });
+          console.log(`🧹 Cleaned up branch ${branchName}`);
+        } catch (error: any) {
+          console.log(`⚠️  Could not cleanup branch: ${error.message}`);
+        }
+        console.log('\nPress Enter to continue...');
+        rl.question('', () => {
+          showNodeMenu(selectedNode, combinedPdg, projectPath, gitManager, cloneResult, rl, askForNodeId, qualityAnalyzer);
+        });
+        return;
+      }
+
+      // Step 3+: Now proceed with refactoring (branch already created)
+      await performRefactoring(selectedNode, combinedPdg, projectPath, currentMetrics, currentScore, qualityAnalyzer, rl, gitManager, cloneResult, askForNodeId, testingResult, branchName);
     } catch (error: any) {
       console.log(`\n❌ Error during refactoring: ${error.message}\n`);
       console.log('Press Enter to continue...');
@@ -300,6 +349,415 @@ async function refactorNode(
       });
     }
   });
+}
+
+/**
+ * Run testing harness: validate existing tests and generate missing ones
+ */
+async function runTestingHarness(
+  selectedNode: any,
+  projectPath: string,
+  combinedPdg: any,
+  qualityAnalyzer: QualityAnalyzer,
+  currentMetrics: any,
+  anthropicApiKey: string | undefined,
+  rl: readline.Interface
+): Promise<{ passed: boolean; testFiles: string[] }> {
+  const { execSync } = require('child_process');
+  const fs = require('fs');
+  const path = require('path');
+
+  // Initialize test infrastructure
+  const testCoverageAnalyzer = new TestCoverageAnalyzer(projectPath);
+
+  // Extract relative path from the selected node's file path for scoping
+  // Handle both absolute and relative paths
+  const absoluteProjectPath = path.isAbsolute(projectPath) ? projectPath : path.join(process.cwd(), projectPath);
+  const absoluteFilePath = path.isAbsolute(selectedNode.filePath) ? selectedNode.filePath : path.join(absoluteProjectPath, selectedNode.filePath);
+  const relativeFilePath = path.relative(absoluteProjectPath, absoluteFilePath);
+
+  // STEP 1: Analyze test coverage FIRST
+  console.log('📊 Analyzing test coverage for selected node...\n');
+  const coverageInfo = await testCoverageAnalyzer.analyzeNode(selectedNode, combinedPdg);
+
+  console.log(`📊 Test Coverage Analysis:`);
+  console.log(`   Tests found: ${coverageInfo.hasTests ? 'Yes' : 'No'}`);
+  console.log(`   Test files: ${coverageInfo.testFiles.length}`);
+  console.log(`   Estimated test cases: ${coverageInfo.estimatedTestCount}`);
+  console.log(`   Required for 100% coverage: ${coverageInfo.requiredTests}`);
+  console.log(`   Coverage estimate: ${coverageInfo.coverageEstimate.toFixed(0)}%`);
+  console.log(`   Status: ${coverageInfo.coverageStatus}\n`);
+
+  // STEP 2: Initialize TestRunner with target file path for scoped detection
+  const testRunner = new TestRunner(projectPath, relativeFilePath);
+
+  // STEP 3: Ensure project dependencies are installed (NOT test framework - just npm install)
+  const depsInstalled = await testRunner.ensureDependenciesInstalled(relativeFilePath);
+  if (!depsInstalled) {
+    console.log('⚠️  Failed to install project dependencies. Tests may fail.\n');
+  }
+
+  // STEP 4: Check if testing infrastructure exists
+  console.log('🔍 Checking for test framework (vitest/jest/mocha)...\n');
+  let framework = testRunner.getFramework();
+  const hasProperFramework = framework && ['vitest', 'jest', 'mocha'].includes(framework.name);
+
+  if (hasProperFramework && framework) {
+    console.log(`   ✅ Found test framework: ${framework.name}\n`);
+  } else {
+    console.log('   ⚠️  No test framework found\n');
+  }
+
+  // STEP 5: If coverage < 100% AND no infrastructure, offer to install vitest
+  if (coverageInfo.coverageEstimate < 100 && !hasProperFramework) {
+    console.log('⚠️  Test framework required:');
+    console.log(`   - Coverage is ${coverageInfo.coverageEstimate.toFixed(0)}% (need 100%)`);
+    console.log('   - No test framework detected (checked for: vitest, jest, mocha)');
+    console.log('   - Cannot generate missing tests without a test framework\n');
+
+    // Ask user if they want to install vitest
+    const installAnswer = await new Promise<string>((resolve) => {
+      rl.question('Would you like to install vitest? (y/n): ', resolve);
+    });
+
+    if (installAnswer.toLowerCase() === 'y') {
+      const installed = await testRunner.installVitest();
+      if (!installed) {
+        console.log('❌ Could not install vitest. Cannot proceed with test generation.\n');
+        return { passed: false, testFiles: [] };
+      }
+      framework = testRunner.getFramework();
+    } else {
+      console.log('❌ Cannot proceed without a test framework.\n');
+      return { passed: false, testFiles: [] };
+    }
+  }
+
+  // STEP 6: If we have tests OR need to generate tests, verify framework exists
+  if ((coverageInfo.hasTests || coverageInfo.coverageEstimate < 100) && !framework) {
+    console.log('❌ No test framework available. Cannot proceed.\n');
+    return { passed: false, testFiles: [] };
+  }
+
+  if (framework) {
+    console.log(`✅ Test framework: ${framework.name}\n`);
+  }
+
+  // STEP 7: If we have 100% coverage, validate existing tests
+  if (coverageInfo.hasTests && coverageInfo.coverageEstimate >= 100) {
+    console.log('🔍 Step 2a: Validating existing tests...');
+    console.log('   All tests must pass before refactoring can proceed.\n');
+
+    const testResult = await testRunner.runTests(coverageInfo.testFiles);
+
+    console.log(`\n📋 Test Results:`);
+    console.log(`   Total: ${testResult.total}`);
+    console.log(`   Passed: ${testResult.passed}`);
+    console.log(`   Failed: ${testResult.failed}\n`);
+
+    if (!testResult.success || testResult.failed > 0) {
+      console.log('❌ TEST VALIDATION FAILED');
+      console.log('\n⚠️  Pre-existing tests are failing. Cannot proceed with refactoring.');
+      console.log('   These tests existed before our analysis and must be fixed manually.\n');
+
+      console.log('Failed test output:');
+      console.log('─'.repeat(80));
+      console.log(testResult.output.substring(0, 1000));
+      console.log('─'.repeat(80));
+      console.log('\n💡 Please fix the failing tests in the target repository and try again.\n');
+
+      return { passed: false, testFiles: coverageInfo.testFiles }; // Block refactoring
+    }
+
+    console.log('✅ All existing tests pass!\n');
+  } else {
+    console.log('⚠️  No existing tests found for this node.\n');
+  }
+
+  // Track all test files (existing + newly generated)
+  let allTestFiles = [...coverageInfo.testFiles];
+
+  // Step 2b: Check coverage and generate missing tests
+  if (coverageInfo.coverageEstimate < 100) {
+    if (coverageInfo.hasTests) {
+      console.log(`🔬 Step 2b: Test coverage is ${coverageInfo.coverageEstimate.toFixed(0)}% - Generating additional tests...`);
+      console.log(`   Need ${coverageInfo.missingTests} more test cases for 100% coverage\n`);
+    } else {
+      console.log(`🔬 Step 2b: No tests found (0% coverage) - Creating full test suite...`);
+      console.log(`   Generating ${coverageInfo.requiredTests} test cases for complete coverage\n`);
+    }
+
+    if (!anthropicApiKey) {
+      console.log('⚠️  Anthropic API key not configured. Cannot auto-generate tests.');
+      console.log('   Proceeding with refactoring, but coverage remains incomplete.\n');
+      return { passed: true, testFiles: allTestFiles }; // Continue but with warning
+    }
+
+    // Framework must exist at this point (validated earlier)
+    if (!framework) {
+      console.log('❌ Error: No test framework available for test generation.\n');
+      return { passed: false, testFiles: allTestFiles };
+    }
+
+    try {
+      const filePath = selectedNode.filePath;
+      const originalCode = fs.readFileSync(filePath, 'utf-8');
+      const lines = originalCode.split('\n');
+      const startLine = selectedNode.startLine - 1;
+      const endLine = selectedNode.endLine;
+      const codeToTest = lines.slice(startLine, endLine).join('\n');
+
+      // Read existing tests if they exist
+      let existingTests = '';
+      if (coverageInfo.testFiles.length > 0) {
+        existingTests = fs.readFileSync(coverageInfo.testFiles[0], 'utf-8');
+      }
+
+      console.log('⏳ Generating tests with Claude...\n');
+
+      const testGenerator = new ClaudeTestGenerator(anthropicApiKey);
+      const testResult = await testGenerator.generateTests({
+        code: codeToTest,
+        filePath,
+        nodeType: selectedNode.type,
+        nodeName: selectedNode.name,
+        existingTests,
+        testFramework: framework.name, // Now safe - framework is guaranteed to exist
+        cyclomaticComplexity: currentMetrics.cyclomaticComplexity || 1,
+        missingTestCount: coverageInfo.missingTests
+      });
+
+      // Validate that tests were actually generated
+      if (!testResult.testCode || testResult.testCode.trim().length === 0) {
+        console.log('❌ Error: No test code was generated by Claude.\n');
+        console.log('   Proceeding with refactoring without additional tests.\n');
+        return { passed: true, testFiles: allTestFiles };
+      }
+
+      // Validate that test code contains test cases (it, test, describe keywords)
+      const hasDescribe = /\bdescribe\s*\(/.test(testResult.testCode);
+      const hasTestCases = /\b(it|test)\s*\(/.test(testResult.testCode);
+
+      if (!hasTestCases) {
+        console.log('❌ Error: Generated code does not contain actual test cases.\n');
+        console.log('   Found describe blocks: ' + hasDescribe);
+        console.log('   Found it() or test() blocks: false\n');
+        console.log('Full generated code:');
+        console.log('─'.repeat(80));
+        console.log(testResult.testCode);
+        console.log('─'.repeat(80));
+
+        // Ask user if they want to regenerate
+        const retry = await new Promise<boolean>((resolve) => {
+          rl.question('\nAttempt to regenerate tests with a different approach? (y/n): ', (answer) => {
+            resolve(answer.toLowerCase() === 'y');
+          });
+        });
+
+        if (!retry) {
+          console.log('\n⚠️  Proceeding with refactoring without additional tests.\n');
+          return { passed: true, testFiles: allTestFiles };
+        } else {
+          console.log('\n⚠️  Automatic retry not yet implemented. Proceeding without tests.\n');
+          return { passed: true, testFiles: allTestFiles };
+        }
+      }
+
+      // Count actual test cases
+      const testMatches = testResult.testCode.match(/\b(it|test)\s*\(/g);
+      const actualTestCount = testMatches ? testMatches.length : 0;
+
+      if (actualTestCount === 0) {
+        console.log(`❌ Error: Found describe blocks but no actual test cases (it/test).\n`);
+        console.log('Full generated code:');
+        console.log('─'.repeat(80));
+        console.log(testResult.testCode);
+        console.log('─'.repeat(80));
+        console.log('\n⚠️  Proceeding with refactoring without additional tests.\n');
+        return { passed: true, testFiles: allTestFiles };
+      }
+
+      console.log(`✅ Validation passed: Found ${actualTestCount} test cases\n`);
+
+      console.log('📝 Generated test code:\n');
+      console.log('Test Cases:');
+      testResult.testCases.forEach((tc, i) => console.log(`   ${i + 1}. ${tc}`));
+      console.log(`\nExplanation: ${testResult.explanation}\n`);
+
+      // Show FULL preview (not truncated) for debugging
+      console.log('Generated test preview (FULL):');
+      console.log('─'.repeat(80));
+      console.log(testResult.testCode);
+      console.log('─'.repeat(80));
+      console.log(`\nTotal length: ${testResult.testCode.length} characters\n`);
+
+      // Ask user to approve
+      const approved = await new Promise<boolean>((resolve) => {
+        rl.question('\nApprove and save these tests? (y/n): ', (answer) => {
+          resolve(answer.toLowerCase() === 'y');
+        });
+      });
+
+      if (!approved) {
+        console.log('\n⚠️  Test generation cancelled by user.');
+        console.log('   Proceeding with refactoring without additional tests.\n');
+        return { passed: true, testFiles: allTestFiles };
+      }
+
+      // Write or merge tests
+      const testFilePath = testResult.testFilePath;
+      let finalTestCode = testResult.testCode;
+
+      if (fs.existsSync(testFilePath)) {
+        console.log('\n🔀 Merging with existing test file...');
+        finalTestCode = await testGenerator.mergeWithExistingTests(
+          testFilePath,
+          testResult.testCode,
+          anthropicApiKey
+        );
+      }
+
+      // Final validation before writing
+      const finalTestMatches = finalTestCode.match(/\b(it|test)\s*\(/g);
+      const finalTestCount = finalTestMatches ? finalTestMatches.length : 0;
+
+      if (finalTestCount === 0) {
+        console.log('\n❌ CRITICAL: Final validation failed - no test cases in code to be written!');
+        console.log('Code to be written:');
+        console.log('─'.repeat(80));
+        console.log(finalTestCode);
+        console.log('─'.repeat(80));
+        console.log('\n⚠️  NOT writing empty test file. Proceeding without additional tests.\n');
+        return { passed: true, testFiles: allTestFiles };
+      }
+
+      // Write test file
+      fs.writeFileSync(testFilePath, finalTestCode, 'utf-8');
+      console.log(`✅ Test file saved: ${testFilePath}`);
+
+      // Add to tracked test files
+      if (!allTestFiles.includes(testFilePath)) {
+        allTestFiles.push(testFilePath);
+      }
+
+      // Run new tests to verify they pass
+      console.log('\n🧪 Running newly generated tests...\n');
+      let newTestResult = await testRunner.runTests([testFilePath]);
+
+      // Test fixing loop - try to fix failing tests automatically
+      let fixAttempts = 0;
+      const maxFixAttempts = 2;
+
+      while ((newTestResult.failed > 0 || newTestResult.total === 0) && fixAttempts < maxFixAttempts) {
+        console.log('⚠️  Some generated tests are failing:');
+        console.log('─'.repeat(80));
+        console.log(newTestResult.output.substring(0, 1000));
+        if (newTestResult.output.length > 1000) {
+          console.log('\n... (output truncated)');
+        }
+        console.log('─'.repeat(80));
+
+        // If no tests were found, show the test file content
+        if (newTestResult.total === 0) {
+          console.log('\n⚠️  No test cases found in the generated file!');
+          console.log('Generated test file content (first 2000 chars):');
+          console.log('─'.repeat(80));
+          try {
+            const testFileContent = fs.readFileSync(testFilePath, 'utf-8');
+            console.log(testFileContent.substring(0, 2000));
+            if (testFileContent.length > 2000) {
+              console.log('\n... (truncated)');
+            }
+          } catch (error: any) {
+            console.log(`Could not read test file: ${error.message}`);
+          }
+          console.log('─'.repeat(80));
+        }
+
+        fixAttempts++;
+        console.log(`\n🔧 Attempting to fix tests automatically (attempt ${fixAttempts}/${maxFixAttempts})...\n`);
+
+        try {
+          // Read current test code and original source code
+          const currentTestCode = fs.readFileSync(testFilePath, 'utf-8');
+          const sourceCode = fs.readFileSync(filePath, 'utf-8');
+
+          // Use Claude to fix the tests
+          const fixedTestResult = await testGenerator.fixFailingTests({
+            testCode: currentTestCode,
+            sourceCode: codeToTest,
+            failureOutput: newTestResult.output,
+            testFramework: framework.name,
+            testFilePath
+          });
+
+          if (fixedTestResult && fixedTestResult.trim().length > 0) {
+            // Validate that fixed tests have actual test cases
+            const hasTestCases = /\b(it|test)\s*\(/.test(fixedTestResult);
+            if (!hasTestCases) {
+              console.log('❌ Fixed test code has no test cases. Skipping fix.\n');
+              break;
+            }
+
+            // Write fixed test code
+            fs.writeFileSync(testFilePath, fixedTestResult, 'utf-8');
+            console.log(`✅ Applied test fixes\n`);
+
+            // Run tests again
+            console.log('🧪 Running fixed tests...\n');
+            newTestResult = await testRunner.runTests([testFilePath]);
+
+            if (newTestResult.success && newTestResult.failed === 0 && newTestResult.total > 0) {
+              console.log(`✅ All ${newTestResult.total} tests now pass!\n`);
+              break;
+            }
+          } else {
+            console.log('❌ Could not generate test fixes.\n');
+            break;
+          }
+        } catch (error: any) {
+          console.log(`❌ Error fixing tests: ${error.message}\n`);
+          break;
+        }
+      }
+
+      // After fix attempts, check if tests are still failing
+      if (newTestResult.failed > 0 || newTestResult.total === 0) {
+        console.log('\n⚠️  Tests are still failing after fix attempts.');
+        console.log('You may need to fix these tests manually.');
+
+        const continueAnyway = await new Promise<boolean>((resolve) => {
+          rl.question('\nContinue with refactoring anyway? (y/n): ', (answer) => {
+            resolve(answer.toLowerCase() === 'y');
+          });
+        });
+
+        if (!continueAnyway) {
+          return { passed: false, testFiles: allTestFiles };
+        }
+      } else if (fixAttempts > 0) {
+        console.log(`✅ All ${newTestResult.total} tests pass after ${fixAttempts} fix attempt(s)!`);
+      } else {
+        console.log(`✅ All ${newTestResult.total} new tests pass!`);
+      }
+
+      // Stage test file for commit (will be included in final commit)
+      try {
+        execSync(`git add "${testFilePath}"`, { cwd: projectPath, stdio: 'pipe' });
+        console.log(`✅ Test file will be included in commit\n`);
+      } catch (error: any) {
+        console.log(`⚠️  Could not stage test file: ${error.message}\n`);
+      }
+
+    } catch (error: any) {
+      console.log(`\n❌ Error generating tests: ${error.message}`);
+      console.log('   Proceeding with refactoring without additional tests.\n');
+    }
+  } else {
+    console.log('✅ Test coverage is already at 100%!\n');
+  }
+
+  return { passed: true, testFiles: allTestFiles }; // All checks passed
 }
 
 /**
@@ -315,29 +773,19 @@ async function performRefactoring(
   rl: readline.Interface,
   gitManager: GitRepositoryManager,
   cloneResult: any,
-  askForNodeId: () => void
+  askForNodeId: () => void,
+  testingResult: { passed: boolean; testFiles: string[] },
+  branchName: string
 ) {
   const { execSync } = require('child_process');
   const fs = require('fs');
   const path = require('path');
 
-  // Step 1: Create git branch
-  console.log('\n📋 Step 1: Creating git branch...');
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
-  const baseBranchName = `refactor/${selectedNode.name.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase()}`;
-  // Always include timestamp to ensure unique branch names
-  const branchName = `${baseBranchName}-${timestamp}`;
+  // Check if Anthropic API key is configured (needed for refactoring)
+  const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
 
-  // Create the local branch
-  try {
-    execSync(`git checkout -b ${branchName}`, { cwd: projectPath, stdio: 'pipe' });
-    console.log(`✅ Created branch: ${branchName}`);
-  } catch (error: any) {
-    throw new Error(`Failed to create branch: ${error.message}`);
-  }
-
-  // Step 2: Read the code file
-  console.log('\n📖 Step 2: Reading code file...');
+  // Step 3: Read the code file
+  console.log('\n📖 Step 3: Reading code file...');
   const filePath = selectedNode.filePath;
 
   if (!fs.existsSync(filePath)) {
@@ -352,15 +800,14 @@ async function performRefactoring(
 
   console.log(`✅ Read ${endLine - startLine} lines from ${path.basename(filePath)}`);
 
-  // Step 3: Refactor the code using Claude API
-  console.log('\n🤖 Step 3: AI-powered refactoring with Claude...');
+  // Step 4: Refactor the code using Claude API
+  console.log('\n🤖 Step 4: AI-powered refactoring with Claude...');
   console.log('\nOriginal code:');
   console.log('─'.repeat(80));
   console.log(codeToRefactor.substring(0, 500) + (codeToRefactor.length > 500 ? '...' : ''));
   console.log('─'.repeat(80));
 
-  // Check if Anthropic API key is configured
-  const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
+  // Check if Anthropic API key is configured for refactoring
   if (!anthropicApiKey) {
     console.log('\n❌ Anthropic API key not configured.');
     console.log('Please add ANTHROPIC_API_KEY to your .env file.');
@@ -453,8 +900,8 @@ async function performRefactoring(
     }
   }
 
-  // Step 4: Re-analyze metrics
-  console.log('\n📊 Step 4: Re-analyzing metrics...');
+  // Step 5: Re-analyze metrics
+  console.log('\n📊 Step 5: Re-analyzing metrics...');
 
   const ProgramDependencyGraphBuilder = require('./ProgramDependencyGraphBuilder').ProgramDependencyGraphBuilder;
 
@@ -498,7 +945,7 @@ async function performRefactoring(
     console.log('Continuing with original metrics...');
   }
 
-  // Step 5: Show metrics comparison
+  // Step 6: Show metrics comparison
   console.log('\n📈 Metrics Comparison:');
   console.log('─'.repeat(80));
   console.log(`${'Metric'.padEnd(30)} ${'Before'.padEnd(15)} ${'After'.padEnd(15)} ${'Change'.padEnd(15)}`);
@@ -529,27 +976,247 @@ async function performRefactoring(
   console.log(`${'Lines of Code (logical)'.padEnd(30)} ${locBefore.toString().padEnd(15)} ${locAfter.toString().padEnd(15)} ${(locChange > 0 ? '+' : '') + locChange}`);
   console.log('─'.repeat(80));
 
-  // Step 6: Commit changes
-  console.log('\n💾 Step 5: Committing changes...');
+  // Step 7: Post-refactoring test validation
+  console.log('\n🧪 Step 7: Validating tests after refactoring...');
+
+  const testRunner = new TestRunner(projectPath);
+
+  if (testingResult.testFiles.length > 0) {
+    console.log('   Running all tests to ensure refactoring didn\'t break anything...\n');
+
+    const postTestResult = await testRunner.runTests(testingResult.testFiles);
+
+    console.log(`📋 Post-Refactoring Test Results:`);
+    console.log(`   Total: ${postTestResult.total}`);
+    console.log(`   Passed: ${postTestResult.passed}`);
+    console.log(`   Failed: ${postTestResult.failed}\n`);
+
+    if (!postTestResult.success || postTestResult.failed > 0) {
+      console.log('❌ TESTS FAILED AFTER REFACTORING!');
+      console.log('\n⚠️  Attempting to fix the issue (could be in refactored code or tests)...\n');
+
+      console.log('Failed test output:');
+      console.log('─'.repeat(80));
+      console.log(postTestResult.output.substring(0, 1000));
+      console.log('─'.repeat(80));
+
+      // Scenario 3: Try to fix either refactored code or tests (or both)
+      let fixAttempts = 0;
+      const maxFixAttempts = 2;
+      let currentTestResult = postTestResult;
+
+      if (!anthropicApiKey) {
+        console.log('\n❌ Cannot fix automatically - ANTHROPIC_API_KEY not set.');
+        console.log('   Rolling back changes...\n');
+        fs.writeFileSync(filePath, originalCode, 'utf-8');
+        console.log('✅ Original code restored');
+        throw new Error('Tests failed after refactoring. Changes have been rolled back.');
+      }
+
+      const testGenerator = new ClaudeTestGenerator(anthropicApiKey);
+      const refactoredCode = fs.readFileSync(filePath, 'utf-8');
+
+      while (fixAttempts < maxFixAttempts && (currentTestResult.failed > 0 || currentTestResult.total === 0)) {
+        fixAttempts++;
+        console.log(`\n🔧 Fix attempt ${fixAttempts}/${maxFixAttempts}...\n`);
+
+        try {
+          // For each failing test file, try to fix it
+          for (const testFile of testingResult.testFiles) {
+            const testCode = fs.readFileSync(testFile, 'utf-8');
+
+            console.log(`   Analyzing: ${path.relative(projectPath, testFile)}`);
+
+            // Use the test fix method - it will analyze the failure and decide what to fix
+            const fixedTestCode = await testGenerator.fixFailingTests({
+              testCode,
+              sourceCode: refactoredCode,
+              failureOutput: currentTestResult.output,
+              testFramework: 'vitest',
+              testFilePath: testFile
+            });
+
+            if (fixedTestCode && fixedTestCode.trim().length > 0) {
+              const hasTestCases = /\b(it|test)\s*\(/.test(fixedTestCode);
+              if (hasTestCases) {
+                fs.writeFileSync(testFile, fixedTestCode, 'utf-8');
+                console.log(`   ✅ Applied fixes to test\n`);
+              }
+            }
+          }
+
+          // Re-run tests
+          console.log('   Re-running tests...\n');
+          currentTestResult = await testRunner.runTests(testingResult.testFiles);
+
+          if (currentTestResult.success && currentTestResult.failed === 0 && currentTestResult.total > 0) {
+            console.log(`   ✅ All ${currentTestResult.total} tests pass now!\n`);
+            break;
+          } else {
+            console.log(`   ⚠️  Still failing: ${currentTestResult.failed}/${currentTestResult.total}\n`);
+          }
+        } catch (error: any) {
+          console.log(`   ❌ Error during fix attempt: ${error.message}\n`);
+        }
+      }
+
+      // Check if fixes worked
+      if (currentTestResult.failed > 0 || currentTestResult.total === 0) {
+        console.log(`\n❌ Could not fix tests after ${maxFixAttempts} attempts.`);
+        console.log('   Rolling back refactored code...\n');
+        fs.writeFileSync(filePath, originalCode, 'utf-8');
+        console.log('✅ Original code restored');
+        throw new Error('Tests failed after refactoring. Changes have been rolled back.');
+      }
+
+      console.log('✅ Tests fixed successfully! Refactoring is complete.\n');
+    }
+
+    console.log('✅ All tests still pass after refactoring!\n');
+  } else {
+    console.log('⚠️  No tests found. Skipping post-refactoring validation.\n');
+  }
+
+  // Step 8: Commit changes
+  console.log('\n💾 Step 8: Committing changes...');
+
+  // Find git root directory (the repo we're working in)
+  let gitRoot: string;
+  try {
+    gitRoot = execSync('git rev-parse --show-toplevel', {
+      cwd: projectPath,
+      encoding: 'utf-8'
+    }).trim();
+    console.log(`   Git repository root: ${gitRoot}`);
+  } catch (error) {
+    console.log('   ⚠️  Not in a git repository, skipping git operations\n');
+    gitRoot = projectPath;
+  }
 
   try {
-    execSync(`git add "${filePath}"`, { cwd: projectPath, stdio: 'pipe' });
+    // Stage the refactored file
+    const relativeFilePath = path.relative(gitRoot, filePath);
+    execSync(`git add "${relativeFilePath}"`, { cwd: gitRoot, stdio: 'pipe' });
 
-    const commitMessage = `refactor: improve ${selectedNode.name}
+    // Stage all test files (if any exist)
+    if (testingResult.testFiles.length > 0) {
+      for (const testFile of testingResult.testFiles) {
+        try {
+          const relativeTestFile = path.relative(gitRoot, testFile);
+          execSync(`git add "${relativeTestFile}"`, { cwd: gitRoot, stdio: 'pipe' });
+          console.log(`   ✅ Staged test file: ${relativeTestFile}`);
+        } catch (error: any) {
+          console.log(`   ⚠️  Could not stage test file ${testFile}: ${error.message}`);
+        }
+      }
+    }
+
+    // Stage test infrastructure files (package.json, vitest.config.ts, package-lock.json)
+    // These may have been modified during vitest installation
+    console.log('\n📦 Checking for test infrastructure files to stage...');
+
+    const infrastructureFiles = [
+      'package.json',
+      'package-lock.json',
+      'vitest.config.ts'
+    ];
+
+    // Determine which directory to check for infrastructure files
+    // If target file is in a subdirectory with its own package.json, check there too
+    const checkDirs: string[] = [projectPath];
+    const targetFilePath = selectedNode.filePath.replace(projectPath + '/', '');
+
+    if (targetFilePath) {
+      const subDirs = ['server', 'client', 'packages', 'apps'];
+      for (const subDir of subDirs) {
+        if (targetFilePath.startsWith(subDir + '/') || targetFilePath.startsWith(subDir + path.sep)) {
+          const subDirPath = path.join(projectPath, subDir);
+          checkDirs.push(subDirPath);
+          console.log(`   Target is in ${subDir}/ - will check both root and ${subDir}/`);
+          break;
+        }
+      }
+    }
+
+    let stagedInfraFiles = 0;
+    for (const dir of checkDirs) {
+      const relativeDir = path.relative(projectPath, dir) || 'root';
+      console.log(`   Checking ${relativeDir} for infrastructure files...`);
+
+      for (const fileName of infrastructureFiles) {
+        const filePath = path.join(dir, fileName);
+        if (fs.existsSync(filePath)) {
+          try {
+            // Convert to relative path from git root for git commands
+            const relativeFilePath = path.relative(gitRoot, filePath);
+
+            // Check if file has changes using git status
+            const statusOutput = execSync(`git status --porcelain "${relativeFilePath}"`, {
+              cwd: gitRoot,
+              encoding: 'utf-8'
+            }).trim();
+
+            if (statusOutput) {
+              execSync(`git add "${relativeFilePath}"`, { cwd: gitRoot, stdio: 'pipe' });
+              console.log(`      ✅ Staged: ${relativeFilePath}`);
+              stagedInfraFiles++;
+            } else {
+              console.log(`      ⏭️  ${relativeFilePath} (no changes)`);
+            }
+          } catch (error: any) {
+            console.log(`      ⚠️  Could not stage ${path.relative(gitRoot, filePath)}: ${error.message}`);
+          }
+        }
+      }
+    }
+
+    if (stagedInfraFiles === 0) {
+      console.log('   ℹ️  No infrastructure files needed staging\n');
+    } else {
+      console.log(`   ✅ Staged ${stagedInfraFiles} infrastructure file(s)\n`);
+    }
+
+    // Build commit message with details about what's included
+    let commitMessageParts = [`refactor: improve ${selectedNode.name}
 
 Quality Score: ${currentScore.toFixed(1)} → ${newScore.toFixed(1)} (${scoreChange > 0 ? '+' : ''}${scoreChange.toFixed(1)})
 Cyclomatic Complexity: ${ccBefore} → ${ccAfter} (${ccChange > 0 ? '+' : ''}${ccChange})
 Maintainability Index: ${miBefore.toFixed(1)} → ${miAfter.toFixed(1)} (${miChange > 0 ? '+' : ''}${miChange.toFixed(1)})
 Halstead Volume: ${volBefore.toFixed(0)} → ${volAfter.toFixed(0)} (${volChange > 0 ? '+' : ''}${volChange.toFixed(0)})
-Lines of Code (logical): ${locBefore} → ${locAfter} (${locChange > 0 ? '+' : ''}${locChange})
+Lines of Code (logical): ${locBefore} → ${locAfter} (${locChange > 0 ? '+' : ''}${locChange})`];
 
-🤖 Generated with Claude Code Quality Analyzer`;
+    // Add information about test files if included
+    if (testingResult.testFiles.length > 0) {
+      commitMessageParts.push(`\nTest Coverage: ${testingResult.testFiles.length} test file(s) included`);
+    }
+
+    // Check if vitest.config.ts was added (indicates new test infrastructure)
+    const vitestConfigPath = path.join(projectPath, 'vitest.config.ts');
+    const vitestConfigExists = fs.existsSync(vitestConfigPath);
+    if (vitestConfigExists) {
+      try {
+        const relativeVitestConfigPath = path.relative(gitRoot, vitestConfigPath);
+        const statusOutput = execSync(`git status --porcelain "${relativeVitestConfigPath}"`, {
+          cwd: gitRoot,
+          encoding: 'utf-8'
+        }).trim();
+        if (statusOutput.startsWith('A')) {
+          commitMessageParts.push('Test Infrastructure: Added vitest configuration');
+        }
+      } catch (error) {
+        // Ignore
+      }
+    }
+
+    commitMessageParts.push('\n🤖 Generated with Claude Code Quality Analyzer');
+
+    const commitMessage = commitMessageParts.join('\n');
 
     // Write commit message to temporary file to avoid shell escaping issues
-    const absoluteProjectPath = path.resolve(projectPath);
-    const tempCommitFile = path.join(absoluteProjectPath, '.git', 'COMMIT_EDITMSG_TEMP');
+    const absoluteGitRoot = path.resolve(gitRoot);
+    const tempCommitFile = path.join(absoluteGitRoot, '.git', 'COMMIT_EDITMSG_TEMP');
     fs.writeFileSync(tempCommitFile, commitMessage, 'utf-8');
-    execSync(`git commit -F "${tempCommitFile}"`, { cwd: projectPath, stdio: 'pipe' });
+    execSync(`git commit -F "${tempCommitFile}"`, { cwd: gitRoot, stdio: 'pipe' });
     fs.unlinkSync(tempCommitFile);
 
     console.log('✅ Changes committed');
@@ -557,15 +1224,15 @@ Lines of Code (logical): ${locBefore} → ${locAfter} (${locChange > 0 ? '+' : '
     console.log(`⚠️  Error committing: ${error.message}`);
   }
 
-  // Step 7: Push and create PR
-  console.log('\n🚀 Step 6: Creating Pull Request...');
+  // Step 9: Push and create PR
+  console.log('\n🚀 Step 9: Creating Pull Request...');
 
   rl.question('Push changes and create PR? (y/n): ', async (answer) => {
     if (answer.toLowerCase() === 'y') {
       try {
         // Push branch
         try {
-          execSync(`git push -u origin ${branchName}`, { cwd: projectPath, stdio: 'inherit' });
+          execSync(`git push -u origin ${branchName}`, { cwd: gitRoot, stdio: 'inherit' });
           console.log('✅ Branch pushed to remote');
         } catch (pushError: any) {
           // Check if remote branch exists
@@ -579,7 +1246,7 @@ Lines of Code (logical): ${locBefore} → ${locAfter} (${locChange > 0 ? '+' : '
             });
 
             if (forceAnswer.toLowerCase() === 'y') {
-              execSync(`git push -u origin ${branchName} --force`, { cwd: projectPath, stdio: 'inherit' });
+              execSync(`git push -u origin ${branchName} --force`, { cwd: gitRoot, stdio: 'inherit' });
               console.log('✅ Branch force-pushed to remote');
             } else {
               console.log('\n⚠️  Push cancelled. Changes are committed locally but not pushed.');
@@ -611,6 +1278,56 @@ Lines of Code (logical): ${locBefore} → ${locAfter} (${locChange > 0 ? '+' : '
           const prTitle = `refactor: improve ${selectedNode.name}`;
           console.log(`Title: ${prTitle}\n`);
 
+          // Build testing infrastructure section
+          let testingSection = '';
+          if (testingResult.testFiles.length > 0) {
+            testingSection = `\n## Testing\n\n`;
+            testingSection += `- **Test Files**: ${testingResult.testFiles.length}\n`;
+
+            // Count test cases in test files
+            let totalTestCases = 0;
+            for (const testFile of testingResult.testFiles) {
+              try {
+                const testContent = fs.readFileSync(testFile, 'utf-8');
+                const testMatches = testContent.match(/\b(it|test)\s*\(/g);
+                if (testMatches) {
+                  totalTestCases += testMatches.length;
+                }
+              } catch (error) {
+                // Ignore read errors
+              }
+            }
+            if (totalTestCases > 0) {
+              testingSection += `- **Test Cases**: ${totalTestCases}\n`;
+            }
+
+            // Check if vitest was installed in this PR
+            const infrastructureFiles = ['vitest.config.ts', 'package.json'];
+            const newInfrastructure: string[] = [];
+
+            for (const fileName of infrastructureFiles) {
+              try {
+                const filePath = path.join(projectPath, fileName);
+                if (fs.existsSync(filePath)) {
+                  const relativeInfraPath = path.relative(gitRoot, filePath);
+                  const statusOutput = execSync(`git status --porcelain "${relativeInfraPath}"`, {
+                    cwd: gitRoot,
+                    encoding: 'utf-8'
+                  }).trim();
+                  if (statusOutput.startsWith('M') || statusOutput.startsWith('A')) {
+                    newInfrastructure.push(fileName);
+                  }
+                }
+              } catch (error) {
+                // Ignore
+              }
+            }
+
+            if (newInfrastructure.length > 0) {
+              testingSection += `- **Testing Infrastructure**: Added/Updated (${newInfrastructure.join(', ')})\n`;
+            }
+          }
+
           const prBody = `## Refactoring Summary
 
 **Node:** \`${selectedNode.type}\` - \`${selectedNode.name}\`
@@ -625,7 +1342,7 @@ Lines of Code (logical): ${locBefore} → ${locAfter} (${locChange > 0 ? '+' : '
 | Maintainability Index | ${miBefore.toFixed(1)} | ${miAfter.toFixed(1)} | ${miChange > 0 ? '+' : ''}${miChange.toFixed(1)} |
 | Halstead Volume | ${volBefore.toFixed(0)} | ${volAfter.toFixed(0)} | ${volChange > 0 ? '+' : ''}${volChange.toFixed(0)} |
 | Lines of Code (logical) | ${locBefore} | ${locAfter} | ${locChange > 0 ? '+' : ''}${locChange} |
-
+${testingSection}
 🤖 Generated with [Claude Code Quality Analyzer](https://github.com/anthropics/claude-code)`;
 
           console.log('Description:');
@@ -650,6 +1367,57 @@ Lines of Code (logical): ${locBefore} → ${locAfter} (${locChange > 0 ? '+' : '
         } else {
           // Create PR with gh CLI
           const prTitle = `refactor: improve ${selectedNode.name}`;
+
+          // Build testing infrastructure section
+          let testingSection = '';
+          if (testingResult.testFiles.length > 0) {
+            testingSection = `\n## Testing\n\n`;
+            testingSection += `- **Test Files**: ${testingResult.testFiles.length}\n`;
+
+            // Count test cases in test files
+            let totalTestCases = 0;
+            for (const testFile of testingResult.testFiles) {
+              try {
+                const testContent = fs.readFileSync(testFile, 'utf-8');
+                const testMatches = testContent.match(/\b(it|test)\s*\(/g);
+                if (testMatches) {
+                  totalTestCases += testMatches.length;
+                }
+              } catch (error) {
+                // Ignore read errors
+              }
+            }
+            if (totalTestCases > 0) {
+              testingSection += `- **Test Cases**: ${totalTestCases}\n`;
+            }
+
+            // Check if vitest was installed in this PR
+            const infrastructureFiles = ['vitest.config.ts', 'package.json'];
+            const newInfrastructure: string[] = [];
+
+            for (const fileName of infrastructureFiles) {
+              try {
+                const filePath = path.join(projectPath, fileName);
+                if (fs.existsSync(filePath)) {
+                  const relativeInfraPath = path.relative(gitRoot, filePath);
+                  const statusOutput = execSync(`git status --porcelain "${relativeInfraPath}"`, {
+                    cwd: gitRoot,
+                    encoding: 'utf-8'
+                  }).trim();
+                  if (statusOutput.startsWith('M') || statusOutput.startsWith('A')) {
+                    newInfrastructure.push(fileName);
+                  }
+                }
+              } catch (error) {
+                // Ignore
+              }
+            }
+
+            if (newInfrastructure.length > 0) {
+              testingSection += `- **Testing Infrastructure**: Added/Updated (${newInfrastructure.join(', ')})\n`;
+            }
+          }
+
           const prBody = `## Refactoring Summary
 
 **Node:** \`${selectedNode.type}\` - \`${selectedNode.name}\`
@@ -664,7 +1432,7 @@ Lines of Code (logical): ${locBefore} → ${locAfter} (${locChange > 0 ? '+' : '
 | Maintainability Index | ${miBefore.toFixed(1)} | ${miAfter.toFixed(1)} | ${miChange > 0 ? '+' : ''}${miChange.toFixed(1)} |
 | Halstead Volume | ${volBefore.toFixed(0)} | ${volAfter.toFixed(0)} | ${volChange > 0 ? '+' : ''}${volChange.toFixed(0)} |
 | Lines of Code (logical) | ${locBefore} | ${locAfter} | ${locChange > 0 ? '+' : ''}${locChange} |
-
+${testingSection}
 🤖 Generated with [Claude Code Quality Analyzer](https://github.com/anthropics/claude-code)`;
 
           // Write PR body to temporary file to avoid shell escaping issues

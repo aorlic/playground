@@ -84,9 +84,14 @@ export class TestCoverageAnalyzer {
   private async findTestFiles(node: PDGNode): Promise<string[]> {
     const testFiles: string[] = [];
 
+    // Normalize file path - handle both absolute and relative paths
+    const absoluteFilePath = path.isAbsolute(node.filePath)
+      ? node.filePath
+      : path.join(this.projectRoot, node.filePath);
+
     // Common test file patterns
-    const baseFileName = path.basename(node.filePath, path.extname(node.filePath));
-    const dirName = path.dirname(node.filePath);
+    const baseFileName = path.basename(absoluteFilePath, path.extname(absoluteFilePath));
+    const dirName = path.dirname(absoluteFilePath);
 
     const patterns = [
       // Same directory
@@ -104,8 +109,8 @@ export class TestCoverageAnalyzer {
       path.join(this.projectRoot, 'test', `${baseFileName}.test.ts`),
 
       // Mirror structure in test directory
-      path.join(this.projectRoot, 'tests', path.relative(this.projectRoot, node.filePath).replace(/\.ts$/, '.test.ts')),
-      path.join(this.projectRoot, 'test', path.relative(this.projectRoot, node.filePath).replace(/\.ts$/, '.test.ts'))
+      path.join(this.projectRoot, 'tests', path.relative(this.projectRoot, absoluteFilePath).replace(/\.ts$/, '.test.ts')),
+      path.join(this.projectRoot, 'test', path.relative(this.projectRoot, absoluteFilePath).replace(/\.ts$/, '.test.ts'))
     ];
 
     for (const pattern of patterns) {
@@ -129,25 +134,35 @@ export class TestCoverageAnalyzer {
       try {
         const content = fs.readFileSync(testFile, 'utf-8');
 
-        // Count test cases that mention this node
-        const patterns = [
-          new RegExp(`(it|test)\\s*\\([^)]*${this.escapeRegex(node.name)}`, 'gi'),
-          new RegExp(`(describe|context)\\s*\\([^)]*${this.escapeRegex(node.name)}`, 'gi')
-        ];
+        // Look for describe blocks that match this node's name
+        const describePattern = new RegExp(
+          `describe\\s*\\(['"]\s*${this.escapeRegex(node.name)}\\s*['"]`,
+          'gi'
+        );
+        const describeMatches = content.match(describePattern);
 
-        for (const pattern of patterns) {
-          const matches = content.match(pattern);
-          if (matches) {
-            totalTests += matches.length;
-          }
-        }
-
-        // If no specific matches, count all test cases in file (conservative estimate)
-        if (totalTests === 0) {
-          const allTests = content.match(/(it|test)\s*\(/gi);
+        if (describeMatches && describeMatches.length > 0) {
+          // Found describe block(s) for this node - count ALL test cases in the file
+          // since they're likely all related to this node
+          const allTests = content.match(/\b(it|test)\s*\(/gi);
           if (allTests) {
-            // Assume 30% of tests in file relate to this node
-            totalTests = Math.ceil(allTests.length * 0.3);
+            totalTests += allTests.length;
+          }
+        } else {
+          // No describe block found - try to find individual test cases mentioning this node
+          const testPattern = new RegExp(
+            `(it|test)\\s*\\([^)]*${this.escapeRegex(node.name)}`,
+            'gi'
+          );
+          const testMatches = content.match(testPattern);
+          if (testMatches) {
+            totalTests += testMatches.length;
+          } else {
+            // No matches at all - count all tests and assume 30% relate to this node
+            const allTests = content.match(/\b(it|test)\s*\(/gi);
+            if (allTests) {
+              totalTests += Math.ceil(allTests.length * 0.3);
+            }
           }
         }
       } catch (error) {
